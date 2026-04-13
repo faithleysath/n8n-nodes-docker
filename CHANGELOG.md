@@ -1,3 +1,10 @@
+## 0.6.2 - 2026-04-14
+
+- Fixed long-lived Docker event and log streams so they no longer inherit the default request idle timeout, leaving trigger reconnects and follow durations under node-level control
+- Fixed Docker event cursor deduplication for mixed `time` and `timeNano` payloads by comparing a unified cursor value and clearing stale nanosecond state after newer seconds-only events
+- Fixed TCP connection validation so stale TLS certificate fields no longer block plain TCP credentials, while TLS still requires client certificate and private key pairs
+- Added regression coverage for disabled stream idle timeouts, mixed-precision event replay deduplication, and TCP/TLS credential validation boundaries
+
 ## 0.6.1 - 2026-04-14
 
 - Fixed TCP/TLS connection handling so only omitted ports fall back to Docker defaults, and transient validation or API negotiation failures can retry cleanly

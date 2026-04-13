@@ -936,6 +936,89 @@ test('Docker system events can resume from stored cursor and split items without
 	);
 });
 
+test('Docker system events resumeFromCursor ignores older nanosecond events after a newer seconds-only cursor', async () => {
+	const dockerNode = new Docker();
+	const initialEvent = {
+		Action: 'start',
+		Actor: {
+			ID: 'container-1',
+		},
+		Type: 'container',
+		id: 'container-1',
+		time: 1712982000,
+		timeNano: 1712982000000000000,
+	};
+	const newerSecondsOnlyEvent = {
+		Action: 'stop',
+		Actor: {
+			ID: 'container-1',
+		},
+		Type: 'container',
+		id: 'container-1',
+		time: 1712982002,
+	};
+	const olderNanosecondEvent = {
+		Action: 'die',
+		Actor: {
+			ID: 'container-1',
+		},
+		Type: 'container',
+		id: 'container-1',
+		time: 1712982001,
+		timeNano: 1712982001000000000,
+	};
+	const workflowStaticData = {};
+	let callCount = 0;
+	const context = createExecuteContext({
+		node: createNodeMetadata('Docker', 'docker'),
+		parameters: {
+			eventsActions: ['start', 'stop', 'die'],
+			eventsLookbackSeconds: 300,
+			eventsOutputMode: 'splitItems',
+			eventsReadMode: 'resumeFromCursor',
+			eventsResourceTypes: ['container'],
+			operation: 'events',
+			resource: 'system',
+		},
+		workflowStaticData,
+	});
+
+	await withPatchedDockerClient(
+		{
+			async getEvents() {
+				callCount += 1;
+				return {
+					body: Buffer.from(
+						[
+							...(callCount === 1 ? [initialEvent, newerSecondsOnlyEvent] : [olderNanosecondEvent]),
+						]
+							.map((event) => JSON.stringify(event))
+							.concat('')
+							.join('\n'),
+					),
+					headers: {
+						'content-type': 'application/json',
+					},
+					statusCode: 200,
+				};
+			},
+		},
+		async () => {
+			const [firstItems] = await dockerNode.execute.call(context);
+			const [secondItems] = await dockerNode.execute.call(context);
+
+			assert.equal(callCount, 2);
+			assert.equal(firstItems.length, 2);
+			assert.equal(secondItems.length, 0);
+			assert.equal(workflowStaticData.lastEventTime, newerSecondsOnlyEvent.time);
+			assert.equal('lastEventTimeNano' in workflowStaticData, false);
+			assert.deepEqual(workflowStaticData.recentEventKeys, [
+				getDockerEventKey(newerSecondsOnlyEvent),
+			]);
+		},
+	);
+});
+
 test('Docker Trigger manual execution resolves on the next matching event and stores the cursor', async () => {
 	const dockerTrigger = new DockerTrigger();
 	const stream = new PassThrough();

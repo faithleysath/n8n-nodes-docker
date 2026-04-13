@@ -517,6 +517,7 @@ export class DockerApiClient {
 				timestamps: options.timestamps,
 				until: options.until,
 			},
+			timeoutMs: 0,
 		});
 	}
 
@@ -1244,6 +1245,7 @@ export class DockerApiClient {
 				since: options.since,
 				until: options.until,
 			},
+			timeoutMs: 0,
 		});
 	}
 
@@ -1369,13 +1371,15 @@ export class DockerApiClient {
 							throw new Error('Port must be a positive integer.');
 						}
 
-						const cert = trimToUndefined(this.credentials.cert);
-						const key = trimToUndefined(this.credentials.key);
+						if (this.credentials.connectionMode === 'tls') {
+							const cert = trimToUndefined(this.credentials.cert);
+							const key = trimToUndefined(this.credentials.key);
 
-						if ((cert === undefined) !== (key === undefined)) {
-							throw new Error(
-								'TLS client certificate and client private key must be provided together.',
-							);
+							if ((cert === undefined) !== (key === undefined)) {
+								throw new Error(
+									'TLS client certificate and client private key must be provided together.',
+								);
+							}
 						}
 
 						return;

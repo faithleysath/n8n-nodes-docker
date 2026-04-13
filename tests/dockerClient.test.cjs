@@ -308,7 +308,7 @@ test('DockerApiClient respects explicit API versions for TCP connections', async
 	}
 });
 
-test('DockerApiClient validates explicit ports and only defaults omitted ports', async () => {
+test('DockerApiClient validates explicit ports, defaults omitted ports, and ignores TLS leftovers for TCP', async () => {
 	const tcpClient = new DockerApiClient({
 		apiVersion: '1.51',
 		connectionMode: 'tcp',
@@ -331,6 +331,18 @@ test('DockerApiClient validates explicit ports and only defaults omitted ports',
 		host: '127.0.0.1',
 		port: 123.4,
 	});
+	const tcpClientWithStaleTlsFields = new DockerApiClient({
+		apiVersion: '1.51',
+		cert: 'stale-client-cert',
+		connectionMode: 'tcp',
+		host: '127.0.0.1',
+	});
+	const tlsClientWithMissingKey = new DockerApiClient({
+		apiVersion: '1.51',
+		cert: 'client-cert',
+		connectionMode: 'tls',
+		host: '127.0.0.1',
+	});
 
 	assert.equal(tcpClient.buildRequestOptions('GET', '/v1.51/info', { path: '/info' }).port, 2375);
 	assert.equal(tlsClient.buildRequestOptions('GET', '/v1.51/info', { path: '/info' }).port, 2376);
@@ -341,6 +353,11 @@ test('DockerApiClient validates explicit ports and only defaults omitted ports',
 	await assert.rejects(
 		fractionalPortClient.validateConnectionSettings(),
 		/Port must be a positive integer/,
+	);
+	await tcpClientWithStaleTlsFields.validateConnectionSettings();
+	await assert.rejects(
+		tlsClientWithMissingKey.validateConnectionSettings(),
+		/TLS client certificate and client private key must be provided together/,
 	);
 });
 
@@ -583,6 +600,83 @@ test('DockerApiClient allows request-level timeout overrides for build streams',
 		const buffer = await collectDockerStreamResponse(response);
 
 		assert.equal(buffer.toString('utf8').includes('build complete'), true);
+	} finally {
+		server.closeAllConnections();
+		server.close();
+	}
+});
+
+test('DockerApiClient disables default idle timeouts for event and log streams', async () => {
+	const server = http.createServer((request, response) => {
+		const url = new URL(request.url, 'http://127.0.0.1');
+
+		if (request.method === 'GET' && url.pathname === '/v1.51/events') {
+			setTimeout(() => {
+				response.setHeader('content-type', 'application/json');
+				response.end(
+					[
+						JSON.stringify({ Action: 'start', Type: 'container' }),
+						JSON.stringify({ Action: 'stop', Type: 'container' }),
+						'',
+					].join('\n'),
+				);
+			}, 10);
+			return;
+		}
+
+		if (request.method === 'GET' && url.pathname === '/v1.51/containers/demo/logs') {
+			setTimeout(() => {
+				response.setHeader('content-type', 'application/vnd.docker.raw-stream');
+				response.end(
+					Buffer.concat([
+						createRawStreamFrame(1, 'stdout line\n'),
+						createRawStreamFrame(2, 'stderr line\n'),
+					]),
+				);
+			}, 10);
+			return;
+		}
+
+		response.statusCode = 404;
+		response.end(JSON.stringify({ message: 'not found' }));
+	});
+
+	try {
+		await listen(server, undefined, '127.0.0.1');
+
+		const address = server.address();
+		assert.notEqual(address, null);
+		assert.equal(typeof address, 'object');
+
+		const client = new DockerApiClient(
+			{
+				apiVersion: '1.51',
+				connectionMode: 'tcp',
+				host: '127.0.0.1',
+				port: address.port,
+			},
+			{ timeoutMs: 1 },
+		);
+		const eventsResponse = await client.streamEvents({
+			since: '1712982000',
+		});
+		const logsResponse = await client.streamContainerLogs('demo', {
+			follow: true,
+			stderr: true,
+			stdout: true,
+			tail: 'all',
+			timestamps: false,
+		});
+		const eventsBuffer = await collectDockerStreamResponse(eventsResponse);
+		const logsBuffer = await collectDockerStreamResponse(logsResponse);
+		const events = parseDockerJsonLines(eventsBuffer, eventsResponse.headers['content-type']);
+		const logs = parseDockerRawStream(logsBuffer, logsResponse.headers['content-type']);
+
+		assert.deepEqual(events.entries.map((event) => event.Action), ['start', 'stop']);
+		assert.deepEqual(logs.entries, [
+			{ message: 'stdout line', stream: 'stdout' },
+			{ message: 'stderr line', stream: 'stderr' },
+		]);
 	} finally {
 		server.closeAllConnections();
 		server.close();
