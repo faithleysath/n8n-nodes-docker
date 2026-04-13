@@ -5,13 +5,14 @@
 当前已经完成：
 
 - 独立 npm 包骨架
-- `Docker` 主节点的 Phase 3 JSON / 文本资源能力
+- `Docker` 主节点的 Phase 4 JSON / 文本资源能力
 - `Docker Files` 节点的二进制 / tar 文件能力，包括容器文件归档和 image save/load
+- `Docker Trigger` 节点的 Docker events 触发能力
 - `Docker API` 凭证的可运行连接模型
 - 针对 transport、exec policy、tar 工具和节点边界的自动化测试
 - 从第一期到完全体的分阶段交付文档
 
-这个仓库还**没有**完成完整 Docker 产品矩阵。当前版本已经落地了容器、镜像、网络、卷、daemon metadata，以及独立的文件导入导出和 image archive 节点能力；后续 trigger、build、registry、SSH 等能力仍按路线图继续推进。
+这个仓库还**没有**完成完整 Docker 产品矩阵。当前版本已经落地了容器、镜像、网络、卷、daemon metadata、日志/事件流增强，以及独立的 Docker Trigger 和文件导入导出能力；后续 build、registry、SSH 等能力仍按路线图继续推进。
 
 ## 目标
 
@@ -28,7 +29,7 @@
 
 ## 规划中的节点族
 
-当前仓库已经落下两个节点，完整形态预计包含：
+当前仓库已经落下三个节点，完整形态预计包含：
 
 - `Docker`
   负责容器、镜像、网络、卷、system 等资源的 CRUD 与运维操作
@@ -64,7 +65,7 @@ Docker daemon 的写权限基本等价于宿主机高权限控制，所以这个
 
 ## 开发状态
 
-当前版本：`0.4.1`
+当前版本：`0.5.0`
 
 当前实现状态：
 
@@ -81,6 +82,7 @@ Docker daemon 的写权限基本等价于宿主机高权限控制，所以这个
 - 已实现 `container:top`
 - 已实现 `container:update`
 - 已实现 `container:wait`
+- 已实现 `container:logs` 的 snapshot / followForDuration 双模式
 - 已实现 `image:list`
 - 已实现 `image:inspect`
 - 已实现 `image:pull`
@@ -102,9 +104,11 @@ Docker daemon 的写权限基本等价于宿主机高权限控制，所以这个
 - 已实现 `volume:prune`
 - 已实现 `system:df`
 - 已实现 `system:events`
+- 已实现 `system:events` 的 bounded / resumeFromCursor 双模式
 - 已实现 `system:ping`
 - 已实现 `system:info`
 - 已实现 `system:version`
+- 已实现 `Docker Trigger`
 - 已实现 `Docker Files:copyTo`
 - 已实现 `Docker Files:copyFrom`
 - 已实现 `Docker Files:export`
@@ -113,11 +117,11 @@ Docker daemon 的写权限基本等价于宿主机高权限控制，所以这个
 - 已支持 `Unix Socket`、`TCP`、`TLS`
 - 已实现 `readOnly` / `fullControl` 危险操作门禁
 - 已加入 transport、exec policy、tar 工具、节点元数据与可选集成测试
-- `SSH` / `trigger` / `build` / `registry` 仍未实现
+- `SSH` / `build` / `registry` 仍未实现
 
 ## 当前节点范围
 
-当前包暴露两个节点：
+当前包暴露三个节点：
 
 - `Docker`
   资源范围是 `Container`、`Image`、`Network`、`Volume` 和 `System`
@@ -125,6 +129,9 @@ Docker daemon 的写权限基本等价于宿主机高权限控制，所以这个
 - `Docker Files`
   负责 `copyTo`、`copyFrom`、`export`、`image save`、`image load`
   这个节点不作为 AI 工具，用来隔离 binary 与 tar 工作流
+- `Docker Trigger`
+  负责监听 Docker events，带游标回放、去重和重连
+  这个节点不作为 AI 工具，用来隔离 trigger 生命周期和长连接状态
 
 这版是典型的 **programmatic-style node**，不是 declarative-style。原因是 Docker 的 Unix socket 连接、API version 协商、exec / logs raw-stream 解复用、archive/tar 处理、以及写操作门禁都不适合只靠 declarative routing 来表达。
 
@@ -192,6 +199,9 @@ n8n-nodes-docker/
 │   └── DockerFiles/
 │       ├── DockerFiles.node.ts
 │       └── DockerFiles.node.json
+│   └── DockerTrigger/
+│       ├── DockerTrigger.node.ts
+│       └── DockerTrigger.node.json
 └── package.json
 ```
 

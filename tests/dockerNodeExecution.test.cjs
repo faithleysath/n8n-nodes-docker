@@ -1,12 +1,17 @@
 const assert = require('node:assert/strict');
+const { PassThrough } = require('node:stream');
 const test = require('node:test');
 
 const { Docker } = require('../dist/nodes/Docker/Docker.node.js');
 const { DockerFiles } = require('../dist/nodes/DockerFiles/DockerFiles.node.js');
+const { DockerTrigger } = require('../dist/nodes/DockerTrigger/DockerTrigger.node.js');
 const {
 	DockerApiClient,
 	DockerRequestError,
 } = require('../dist/nodes/Docker/transport/dockerClient.js');
+const {
+	getDockerEventKey,
+} = require('../dist/nodes/Docker/utils/dockerEvents.js');
 const {
 	createSingleFileTarArchive,
 	extractSingleFileFromTarBuffer,
@@ -20,6 +25,20 @@ function createRawStreamFrame(streamType, payload) {
 	header.writeUInt32BE(payloadBuffer.length, 4);
 
 	return Buffer.concat([header, payloadBuffer]);
+}
+
+async function waitForCondition(predicate, timeoutMs = 2_000) {
+	const deadline = Date.now() + timeoutMs;
+
+	while (Date.now() < deadline) {
+		if (predicate()) {
+			return;
+		}
+
+		await new Promise((resolve) => setTimeout(resolve, 10));
+	}
+
+	throw new Error('Timed out waiting for condition.');
 }
 
 function createNodeMetadata(name, type) {
@@ -44,6 +63,7 @@ function createExecuteContext({
 	inputItems = [{ json: {} }],
 	node,
 	parameters,
+	workflowStaticData = {},
 } = {}) {
 	return {
 		continueOnFail() {
@@ -70,6 +90,9 @@ function createExecuteContext({
 
 			return defaultValue;
 		},
+		getWorkflowStaticData() {
+			return workflowStaticData;
+		},
 		helpers: {
 			assertBinaryData(_itemIndex, binaryData) {
 				return binaryData;
@@ -85,6 +108,58 @@ function createExecuteContext({
 				};
 			},
 		},
+	};
+}
+
+function createTriggerContext({
+	credentials = {
+		accessMode: 'readOnly',
+		apiVersion: '1.51',
+		connectionMode: 'unixSocket',
+		socketPath: '/var/run/docker.sock',
+	},
+	mode = 'trigger',
+	node,
+	parameters = {},
+	workflowStaticData = {},
+} = {}) {
+	const emitted = [];
+	const emittedErrors = [];
+
+	return {
+		context: {
+			async getCredentials() {
+				return credentials;
+			},
+			emit(data) {
+				emitted.push(data);
+			},
+			emitError(error) {
+				emittedErrors.push(error);
+			},
+			getActivationMode() {
+				return mode;
+			},
+			getMode() {
+				return mode;
+			},
+			getNode() {
+				return node;
+			},
+			getNodeParameter(name, defaultValue) {
+				if (Object.hasOwn(parameters, name)) {
+					return parameters[name];
+				}
+
+				return defaultValue;
+			},
+			getWorkflowStaticData() {
+				return workflowStaticData;
+			},
+		},
+		emitted,
+		emittedErrors,
+		workflowStaticData,
 	};
 }
 
@@ -563,6 +638,492 @@ test('Docker system events computes a bounded window and aggregates events into 
 				since: '1712981700',
 				until: '1712982000',
 			});
+		},
+	);
+});
+
+test('Docker container logs can follow a stream for a fixed duration and split log items', async () => {
+	const dockerNode = new Docker();
+	const stream = new PassThrough();
+	const context = createExecuteContext({
+		node: createNodeMetadata('Docker', 'docker'),
+		parameters: {
+			containerId: 'demo',
+			includeStderr: true,
+			includeStdout: true,
+			logsFollowDurationSeconds: 1,
+			logsMode: 'followForDuration',
+			logsOutputMode: 'splitItems',
+			operation: 'logs',
+			resource: 'container',
+			since: '',
+			tail: 'all',
+			timestamps: false,
+			until: '',
+		},
+	});
+
+	await withPatchedDockerClient(
+		{
+			async streamContainerLogs(containerId, options) {
+				assert.equal(containerId, 'demo');
+				assert.equal(options.follow, true);
+
+				setImmediate(() => {
+					stream.end(
+						Buffer.concat([
+							createRawStreamFrame(1, 'stdout line\n'),
+							createRawStreamFrame(2, 'stderr line\n'),
+						]),
+					);
+				});
+
+				return {
+					close() {
+						stream.destroy();
+					},
+					headers: {
+						'content-type': 'application/vnd.docker.raw-stream',
+					},
+					statusCode: 200,
+					stream,
+				};
+			},
+		},
+		async () => {
+			const [items] = await dockerNode.execute.call(context);
+
+			assert.deepEqual(
+				items.map((item) => item.json),
+				[
+					{
+						containerId: 'demo',
+						message: 'stdout line',
+						operation: 'logs',
+						stream: 'stdout',
+					},
+					{
+						containerId: 'demo',
+						message: 'stderr line',
+						operation: 'logs',
+						stream: 'stderr',
+					},
+				],
+			);
+		},
+	);
+});
+
+test('Docker system events can resume from stored cursor and split items without duplicates', async () => {
+	const dockerNode = new Docker();
+	const duplicateEvent = {
+		Action: 'start',
+		Actor: {
+			ID: 'container-1',
+		},
+		Type: 'container',
+		id: 'container-1',
+		time: 1712982000,
+		timeNano: 1712982000000000000,
+	};
+	const nextEvent = {
+		Action: 'stop',
+		Actor: {
+			ID: 'container-1',
+		},
+		Type: 'container',
+		id: 'container-1',
+		time: 1712982001,
+		timeNano: 1712982001000000000,
+	};
+	const workflowStaticData = {
+		lastEventTime: duplicateEvent.time,
+		lastEventTimeNano: duplicateEvent.timeNano,
+		recentEventKeys: [getDockerEventKey(duplicateEvent)],
+	};
+	const captured = {};
+	const context = createExecuteContext({
+		node: createNodeMetadata('Docker', 'docker'),
+		parameters: {
+			eventsActions: ['start', 'stop'],
+			eventsLookbackSeconds: 300,
+			eventsOutputMode: 'splitItems',
+			eventsReadMode: 'resumeFromCursor',
+			eventsResourceTypes: ['container'],
+			operation: 'events',
+			resource: 'system',
+		},
+		workflowStaticData,
+	});
+
+	await withPatchedDockerClient(
+		{
+			async getEvents(options) {
+				captured.getEvents = options;
+				return {
+					body: Buffer.from(
+						[
+							JSON.stringify(duplicateEvent),
+							JSON.stringify(nextEvent),
+							'',
+						].join('\n'),
+					),
+					headers: {
+						'content-type': 'application/json',
+					},
+					statusCode: 200,
+				};
+			},
+		},
+		async () => {
+			const [items] = await dockerNode.execute.call(context);
+
+			assert.equal(items.length, 1);
+			assert.equal(items[0].json.action, 'stop');
+			assert.equal(items[0].json.type, 'container');
+			assert.equal(items[0].json.cursor, String(nextEvent.timeNano));
+			assert.equal(workflowStaticData.lastEventTime, nextEvent.time);
+			assert.equal(workflowStaticData.lastEventTimeNano, nextEvent.timeNano);
+			assert.deepEqual(captured.getEvents.filters, JSON.stringify({
+				type: ['container'],
+				event: ['start', 'stop'],
+			}));
+			assert.equal(captured.getEvents.since, String(duplicateEvent.time));
+		},
+	);
+});
+
+test('Docker Trigger manual execution resolves on the next matching event and stores the cursor', async () => {
+	const dockerTrigger = new DockerTrigger();
+	const stream = new PassThrough();
+	const workflowStaticData = {};
+	const { context } = createTriggerContext({
+		mode: 'manual',
+		node: createNodeMetadata('Docker Trigger', 'dockerTrigger'),
+		parameters: {
+			actions: ['start'],
+			resourceTypes: ['container'],
+		},
+		workflowStaticData,
+	});
+
+	await withPatchedDockerClient(
+		{
+			async streamEvents(options) {
+				assert.equal(options.filters, JSON.stringify({
+					type: ['container'],
+					event: ['start'],
+				}));
+
+				setImmediate(() => {
+					stream.write(
+						`${JSON.stringify({
+							Action: 'start',
+							Actor: { ID: 'container-1' },
+							Type: 'container',
+							id: 'container-1',
+							time: 1712982002,
+							timeNano: 1712982002000000000,
+						})}\n`,
+					);
+				});
+
+				return {
+					close() {
+						stream.destroy();
+					},
+					headers: {
+						'content-type': 'application/json',
+					},
+					statusCode: 200,
+					stream,
+				};
+			},
+		},
+		async () => {
+			const response = await dockerTrigger.trigger.call(context);
+			const items = await response.manualTriggerResponse;
+
+			assert.equal(items[0][0].json.action, 'start');
+			assert.equal(items[0][0].json.type, 'container');
+			assert.equal(workflowStaticData.lastEventTime, 1712982002);
+			assert.equal(workflowStaticData.lastEventTimeNano, 1712982002000000000);
+		},
+	);
+});
+
+test('Docker Trigger replays from cursor after a disconnect without emitting duplicates', async () => {
+	const dockerTrigger = new DockerTrigger();
+	const firstStream = new PassThrough();
+	const secondStream = new PassThrough();
+	const replayEvent = {
+		Action: 'start',
+		Actor: {
+			ID: 'container-1',
+		},
+		Type: 'container',
+		id: 'container-1',
+		time: 1712982003,
+		timeNano: 1712982003000000000,
+	};
+	const liveEvent = {
+		Action: 'stop',
+		Actor: {
+			ID: 'container-1',
+		},
+		Type: 'container',
+		id: 'container-1',
+		time: 1712982004,
+		timeNano: 1712982004000000000,
+	};
+	const { context, emitted, workflowStaticData } = createTriggerContext({
+		node: createNodeMetadata('Docker Trigger', 'dockerTrigger'),
+		parameters: {
+			actions: ['start', 'stop'],
+			resourceTypes: ['container'],
+		},
+		workflowStaticData: {
+			lastEventTime: replayEvent.time,
+			lastEventTimeNano: replayEvent.timeNano,
+			recentEventKeys: [getDockerEventKey(replayEvent)],
+		},
+	});
+	let streamCallCount = 0;
+	let replayCallCount = 0;
+
+	await withPatchedDockerClient(
+		{
+			async getEvents() {
+				replayCallCount += 1;
+				return {
+					body: Buffer.from(`${JSON.stringify(replayEvent)}\n`),
+					headers: {
+						'content-type': 'application/json',
+					},
+					statusCode: 200,
+				};
+			},
+			async streamEvents() {
+				streamCallCount += 1;
+
+				if (streamCallCount === 1) {
+					setImmediate(() => {
+						firstStream.end();
+					});
+
+					return {
+						close() {
+							firstStream.destroy();
+						},
+						headers: {
+							'content-type': 'application/json',
+						},
+						statusCode: 200,
+						stream: firstStream,
+					};
+				}
+
+				setImmediate(() => {
+					secondStream.write(`${JSON.stringify(liveEvent)}\n`);
+				});
+
+				return {
+					close() {
+						secondStream.destroy();
+					},
+					headers: {
+						'content-type': 'application/json',
+					},
+					statusCode: 200,
+					stream: secondStream,
+				};
+			},
+		},
+		async () => {
+			const response = await dockerTrigger.trigger.call(context);
+
+			await waitForCondition(() => emitted.length === 1, 2_500);
+			assert.equal(replayCallCount >= 1, true);
+			assert.equal(streamCallCount >= 2, true);
+			assert.equal(emitted[0][0][0].json.action, 'stop');
+			assert.equal(workflowStaticData.lastEventTime, liveEvent.time);
+			assert.equal(workflowStaticData.lastEventTimeNano, liveEvent.timeNano);
+
+			await response.closeFunction();
+		},
+	);
+});
+
+test('Docker Trigger closeFunction stops delayed replay before it emits or opens a stream', async () => {
+	const dockerTrigger = new DockerTrigger();
+	const replayEvent = {
+		Action: 'start',
+		Actor: {
+			ID: 'container-1',
+		},
+		Type: 'container',
+		id: 'container-1',
+		time: 1712982100,
+		timeNano: 1712982100000000000,
+	};
+	const { context, emitted } = createTriggerContext({
+		node: createNodeMetadata('Docker Trigger', 'dockerTrigger'),
+		parameters: {
+			actions: ['start'],
+			resourceTypes: ['container'],
+		},
+		workflowStaticData: {
+			lastEventTime: replayEvent.time,
+			lastEventTimeNano: replayEvent.timeNano,
+			recentEventKeys: [],
+		},
+	});
+	let streamCallCount = 0;
+
+	await withPatchedDockerClient(
+		{
+			async getEvents() {
+				return await new Promise((resolve) => {
+					setTimeout(() => {
+						resolve({
+							body: Buffer.from(`${JSON.stringify(replayEvent)}\n`),
+							headers: {
+								'content-type': 'application/json',
+							},
+							statusCode: 200,
+						});
+					}, 50);
+				});
+			},
+			async streamEvents() {
+				streamCallCount += 1;
+				throw new Error('streamEvents should not be called after close');
+			},
+		},
+		async () => {
+			const response = await dockerTrigger.trigger.call(context);
+
+			await response.closeFunction();
+			await new Promise((resolve) => setTimeout(resolve, 100));
+
+			assert.equal(emitted.length, 0);
+			assert.equal(streamCallCount, 0);
+		},
+	);
+});
+
+test('Docker Trigger manual execution ignores stored cursor and waits for a fresh event', async () => {
+	const dockerTrigger = new DockerTrigger();
+	const stream = new PassThrough();
+	const previousEventTime = 1712981000;
+	const workflowStaticData = {
+		lastEventTime: previousEventTime,
+		lastEventTimeNano: 1712981000000000000,
+		recentEventKeys: ['old-key'],
+	};
+	let capturedSince;
+	const { context } = createTriggerContext({
+		mode: 'manual',
+		node: createNodeMetadata('Docker Trigger', 'dockerTrigger'),
+		parameters: {
+			actions: ['start'],
+			resourceTypes: ['container'],
+		},
+		workflowStaticData,
+	});
+
+	await withPatchedDockerClient(
+		{
+			async streamEvents(options) {
+				capturedSince = options.since;
+
+				setImmediate(() => {
+					stream.write(
+						`${JSON.stringify({
+							Action: 'start',
+							Actor: { ID: 'container-2' },
+							Type: 'container',
+							id: 'container-2',
+							time: 1712982200,
+							timeNano: 1712982200000000000,
+						})}\n`,
+					);
+				});
+
+				return {
+					close() {
+						stream.destroy();
+					},
+					headers: {
+						'content-type': 'application/json',
+					},
+					statusCode: 200,
+					stream,
+				};
+			},
+		},
+		async () => {
+			const response = await dockerTrigger.trigger.call(context);
+			const items = await response.manualTriggerResponse;
+
+			assert.equal(Number(capturedSince) > previousEventTime, true);
+			assert.equal(items[0][0].json.actorId, 'container-2');
+			assert.equal(workflowStaticData.lastEventTime, 1712982200);
+		},
+	);
+});
+
+test('Docker system events resumeFromCursor does not re-emit more than 100 same-second events', async () => {
+	const dockerNode = new Docker();
+	const sameSecondEvents = Array.from({ length: 101 }, (_, index) => ({
+		Action: 'start',
+		Actor: {
+			ID: `container-${index}`,
+		},
+		Type: 'container',
+		id: `container-${index}`,
+		time: 1712982300,
+		timeNano: 1712982300000000000 + index,
+	}));
+	const workflowStaticData = {};
+	let callCount = 0;
+	const context = createExecuteContext({
+		node: createNodeMetadata('Docker', 'docker'),
+		parameters: {
+			eventsActions: ['start'],
+			eventsLookbackSeconds: 300,
+			eventsOutputMode: 'splitItems',
+			eventsReadMode: 'resumeFromCursor',
+			eventsResourceTypes: ['container'],
+			operation: 'events',
+			resource: 'system',
+		},
+		workflowStaticData,
+	});
+
+	await withPatchedDockerClient(
+		{
+			async getEvents() {
+				callCount += 1;
+				return {
+					body: Buffer.from(
+						`${sameSecondEvents.map((event) => JSON.stringify(event)).join('\n')}\n`,
+					),
+					headers: {
+						'content-type': 'application/json',
+					},
+					statusCode: 200,
+				};
+			},
+		},
+		async () => {
+			const [firstItems] = await dockerNode.execute.call(context);
+			const [secondItems] = await dockerNode.execute.call(context);
+
+			assert.equal(callCount, 2);
+			assert.equal(firstItems.length, 101);
+			assert.equal(secondItems.length, 0);
+			assert.equal(workflowStaticData.recentEventKeys.length, 101);
 		},
 	);
 });

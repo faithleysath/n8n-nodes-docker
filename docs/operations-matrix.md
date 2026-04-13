@@ -101,7 +101,7 @@
 | Unix Socket | Yes | Yes | Yes | Yes | Yes | Yes |
 | TCP | Optional | Yes | Yes | Yes | Yes | Yes |
 | TLS | - | Optional | Yes | Yes | Yes | Yes |
-| SSH | - | Optional | Optional | Yes | Yes | Yes |
+| SSH | - | Optional | Optional | - | Optional | Yes |
 
 ## 建议发版映射
 

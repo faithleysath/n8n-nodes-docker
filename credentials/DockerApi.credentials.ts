@@ -12,7 +12,7 @@ export class DockerApi implements ICredentialType {
 	properties: INodeProperties[] = [
 		{
 			displayName:
-				'Phase 3 supports Unix Socket, TCP, and TLS across Docker and Docker Files for containers, images, networks, volumes, and system actions. SSH is still planned for a later phase because n8n credential tests do not support Docker-over-SSH transport out of the box.',
+				'Phase 4 supports Unix Socket, TCP, and TLS across Docker, Docker Files, and Docker Trigger, including advanced log/event streaming. SSH is still planned for a later phase because n8n credential tests do not support Docker-over-SSH transport out of the box.',
 			name: 'phaseTwoNotice',
 			type: 'notice',
 			default: '',

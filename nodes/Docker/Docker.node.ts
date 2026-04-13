@@ -68,7 +68,7 @@ export class Docker implements INodeType {
 		properties: [
 			{
 				displayName:
-					'Phase 3 keeps this main Docker node AI-usable for JSON and text operations across containers, images, networks, volumes, and daemon metadata. Binary image save/load and filesystem tar workflows stay isolated in Docker Files.',
+					'Phase 4 keeps this main Docker node AI-usable for JSON and text operations across containers, images, networks, volumes, and daemon metadata, while adding advanced log/event streaming. Binary image save/load and filesystem tar workflows stay isolated in Docker Files, and event triggers stay isolated in Docker Trigger.',
 				name: 'phaseTwoNotice',
 				type: 'notice',
 				default: '',

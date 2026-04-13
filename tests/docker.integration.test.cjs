@@ -4,7 +4,9 @@ const { randomUUID } = require('node:crypto');
 const test = require('node:test');
 
 const { DockerApiClient } = require('../dist/nodes/Docker/transport/dockerClient.js');
+const { collectDockerStreamResponse } = require('../dist/nodes/Docker/transport/dockerStreams.js');
 const { parseDockerJsonLines } = require('../dist/nodes/Docker/transport/dockerJsonLines.js');
+const { parseDockerRawStream } = require('../dist/nodes/Docker/transport/dockerLogs.js');
 const {
 	createSingleFileTarArchive,
 	extractSingleFileFromTarBuffer,
@@ -366,6 +368,95 @@ if (!shouldRun) {
 			dockerAllowFailure('network', 'rm', networkPruneName);
 			dockerAllowFailure('volume', 'rm', '-f', volumeName);
 			dockerAllowFailure('volume', 'rm', '-f', volumePruneName);
+		}
+	});
+
+	test('Docker integration covers Phase 4 event and log streaming endpoints', async () => {
+		docker('version');
+		ensureImage('alpine:3.20');
+
+		const client = createClient();
+		const testId = randomUUID().slice(0, 8);
+		const eventContainerName = `n8n-trigger-${testId}`;
+		const logContainerName = `n8n-log-stream-${testId}`;
+
+		try {
+			await client.createContainer({
+				body: {
+					Cmd: ['sh', '-c', 'sleep 60'],
+					Image: 'alpine:3.20',
+				},
+				name: eventContainerName,
+			});
+
+			const eventAbortController = new AbortController();
+			const eventTimeout = setTimeout(() => {
+				eventAbortController.abort();
+			}, 2_000);
+			const eventsResponse = await client.streamEvents(
+				{
+					filters: JSON.stringify({
+						container: [eventContainerName],
+						event: ['start', 'stop'],
+						type: ['container'],
+					}),
+					since: String(Math.floor(Date.now() / 1000) - 1),
+				},
+				eventAbortController.signal,
+			);
+
+			await client.startContainer(eventContainerName);
+			await client.stopContainer(eventContainerName, { timeoutSeconds: 1 });
+
+			const eventsBuffer = await collectDockerStreamResponse(
+				eventsResponse,
+				eventAbortController.signal,
+			);
+			clearTimeout(eventTimeout);
+			const events = parseDockerJsonLines(
+				eventsBuffer,
+				eventsResponse.headers['content-type'],
+			);
+			const eventActions = events.entries.map((event) => event.Action);
+			assert.equal(eventActions.includes('start'), true);
+			assert.equal(eventActions.includes('stop'), true);
+
+			await client.createContainer({
+				body: {
+					Cmd: ['sh', '-c', 'printf phase4-one\\n; sleep 1; printf phase4-two\\n; sleep 5'],
+					Image: 'alpine:3.20',
+				},
+				name: logContainerName,
+			});
+			await client.startContainer(logContainerName);
+
+			const logAbortController = new AbortController();
+			const logTimeout = setTimeout(() => {
+				logAbortController.abort();
+			}, 2_500);
+			const logsResponse = await client.streamContainerLogs(
+				logContainerName,
+				{
+					follow: true,
+					stderr: true,
+					stdout: true,
+					tail: 'all',
+					timestamps: false,
+				},
+				logAbortController.signal,
+			);
+			const logsBuffer = await collectDockerStreamResponse(
+				logsResponse,
+				logAbortController.signal,
+			);
+			clearTimeout(logTimeout);
+			const logs = parseDockerRawStream(logsBuffer, logsResponse.headers['content-type']);
+
+			assert.equal(logs.streamText.stdout.includes('phase4-one'), true);
+			assert.equal(logs.streamText.stdout.includes('phase4-two'), true);
+		} finally {
+			dockerAllowFailure('rm', '-f', eventContainerName);
+			dockerAllowFailure('rm', '-f', logContainerName);
 		}
 	});
 	}

@@ -133,6 +133,46 @@ export const containerFields: INodeProperties[] = [
 		displayOptions: containerOperationDisplay(['logs']),
 	},
 	{
+		displayName: 'Logs Mode',
+		name: 'logsMode',
+		type: 'options',
+		default: 'snapshot',
+		description: 'Whether to read a bounded snapshot or follow the log stream for a fixed duration',
+		displayOptions: containerOperationDisplay(['logs']),
+		options: [
+			{
+				name: 'Snapshot',
+				value: 'snapshot',
+				description: 'Read a bounded log snapshot and return immediately',
+			},
+			{
+				name: 'Follow For Duration',
+				value: 'followForDuration',
+				description: 'Follow the log stream until the configured duration elapses',
+			},
+		],
+	},
+	{
+		displayName: 'Output Mode',
+		name: 'logsOutputMode',
+		type: 'options',
+		default: 'aggregate',
+		description: 'How to return the collected log lines',
+		displayOptions: containerOperationDisplay(['logs']),
+		options: [
+			{
+				name: 'Aggregate',
+				value: 'aggregate',
+				description: 'Return one item that contains the full log batch',
+			},
+			{
+				name: 'Split Items',
+				value: 'splitItems',
+				description: 'Return one item per log entry',
+			},
+		],
+	},
+	{
 		displayName: 'Tail',
 		name: 'tail',
 		type: 'string',
@@ -166,6 +206,23 @@ export const containerFields: INodeProperties[] = [
 		placeholder: '2026-04-13T07:00:00Z or 1712982000',
 		description: 'Only return logs before this timestamp',
 		displayOptions: containerOperationDisplay(['logs']),
+	},
+	{
+		displayName: 'Follow Duration Seconds',
+		name: 'logsFollowDurationSeconds',
+		type: 'number',
+		default: 30,
+		typeOptions: {
+			minValue: 1,
+		},
+		description: 'How long to keep following the log stream before returning',
+		displayOptions: {
+			show: {
+				logsMode: ['followForDuration'],
+				operation: ['logs'],
+				resource: ['container'],
+			},
+		},
 	},
 	{
 		displayName: 'Timeout (Seconds)',

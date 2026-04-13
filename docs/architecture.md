@@ -297,7 +297,7 @@ Docker 文件导入导出不能只按普通文本字段来做，必须和 n8n bi
 - `0.2.x` container MVP
 - `0.3.x` 完整 container deepening
 - `0.4.x` image + network + volume + system
-- `0.5.x` trigger + advanced exec/file
+- `0.5.x` trigger + advanced streaming
 - `0.6.x+` build / registry / advanced workflows
 
 在到达完整能力之前，不建议把包对外宣传成“full Docker management for n8n”。

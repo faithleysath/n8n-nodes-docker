@@ -323,11 +323,13 @@
 
 仓库当前处于：
 
-- Phase 3
+- Phase 4
 
 也就是：
 
 - `Docker` 主节点已经覆盖 `container`、`image`、`network`、`volume`、`system`
+- `Docker` 主节点已经补上 `logs` 流式增强与 `system:events` 游标回放
 - `Docker Files` 已覆盖容器文件导入导出，以及 `image save/load`
+- `Docker Trigger` 已覆盖 Docker event 触发、回放、去重与重连
 - `Unix Socket`、`TCP`、`TLS` 已可用
-- `SSH`、`Docker Trigger`、`Docker Build`、`Docker Registry` 仍在后续阶段
+- `SSH`、`Docker Build`、`Docker Registry` 仍在后续阶段

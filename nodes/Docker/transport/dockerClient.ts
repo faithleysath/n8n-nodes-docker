@@ -1,5 +1,9 @@
 import { access } from 'node:fs/promises';
-import type { IncomingHttpHeaders, RequestOptions as HttpRequestOptions } from 'node:http';
+import type {
+	IncomingHttpHeaders,
+	IncomingMessage,
+	RequestOptions as HttpRequestOptions,
+} from 'node:http';
 import { request as httpRequest } from 'node:http';
 import type { RequestOptions as HttpsRequestOptions } from 'node:https';
 import { request as httpsRequest } from 'node:https';
@@ -41,6 +45,13 @@ export interface DockerRawResponse {
 	body: Buffer;
 	headers: IncomingHttpHeaders;
 	statusCode: number;
+}
+
+export interface DockerStreamResponse {
+	close(): void;
+	headers: IncomingHttpHeaders;
+	statusCode: number;
+	stream: IncomingMessage;
 }
 
 export interface DockerVersionResponse extends DockerJson {
@@ -428,6 +439,7 @@ export class DockerApiClient {
 	async getContainerLogs(
 		containerId: string,
 		options: {
+			follow?: boolean;
 			since?: string;
 			stderr: boolean;
 			stdout: boolean;
@@ -441,6 +453,35 @@ export class DockerApiClient {
 			abortSignal,
 			path: `/containers/${encodeURIComponent(containerId)}/logs`,
 			query: {
+				follow: options.follow,
+				since: options.since,
+				stderr: options.stderr,
+				stdout: options.stdout,
+				tail: options.tail,
+				timestamps: options.timestamps,
+				until: options.until,
+			},
+		});
+	}
+
+	async streamContainerLogs(
+		containerId: string,
+		options: {
+			follow: boolean;
+			since?: string;
+			stderr: boolean;
+			stdout: boolean;
+			tail?: string;
+			timestamps: boolean;
+			until?: string;
+		},
+		abortSignal?: AbortSignal,
+	): Promise<DockerStreamResponse> {
+		return this.streamRequest({
+			abortSignal,
+			path: `/containers/${encodeURIComponent(containerId)}/logs`,
+			query: {
+				follow: options.follow,
 				since: options.since,
 				stderr: options.stderr,
 				stdout: options.stdout,
@@ -891,6 +932,86 @@ export class DockerApiClient {
 		};
 	}
 
+	async streamRequest(options: DockerRequestOptions): Promise<DockerStreamResponse> {
+		await this.validateConnectionSettings();
+
+		const method = options.method ?? 'GET';
+		const requestPath = await this.buildRequestPath(
+			options.path,
+			options.query,
+			options.versioned ?? true,
+		);
+		const requestOptions = this.buildRequestOptions(method, requestPath, options);
+		const requestFn = this.credentials.connectionMode === 'tls' ? httpsRequest : httpRequest;
+
+		return await new Promise<DockerStreamResponse>((resolve, reject) => {
+			const request = requestFn(requestOptions, (response) => {
+				const statusCode = response.statusCode ?? 0;
+				const expectedStatusCodes = options.expectedStatusCodes;
+				const isSuccess =
+					expectedStatusCodes !== undefined
+						? expectedStatusCodes.includes(statusCode)
+						: statusCode >= 200 && statusCode < 300;
+
+				if (!isSuccess) {
+					const chunks: Buffer[] = [];
+
+					response.on('data', (chunk: Buffer | string) => {
+						chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+					});
+
+					response.on('end', () => {
+						const body = Buffer.concat(chunks);
+						const parsedBody = parseJsonIfPossible(body);
+						const bodyText =
+							typeof parsedBody === 'string'
+								? parsedBody
+								: parsedBody === undefined
+									? undefined
+									: JSON.stringify(parsedBody);
+
+						reject(
+							new DockerRequestError(`Docker API request failed with status ${statusCode}.`, {
+								bodyText,
+								details: parsedBody,
+								method,
+								path: requestPath,
+								statusCode,
+							}),
+						);
+					});
+
+					return;
+				}
+
+				resolve({
+					close() {
+						response.destroy();
+						request.destroy();
+					},
+					headers: response.headers,
+					statusCode,
+					stream: response,
+				});
+			});
+
+			request.on('error', (error) => {
+				reject(
+					new DockerRequestError(error.message, {
+						method,
+						path: requestPath,
+					}),
+				);
+			});
+
+			if (options.body !== undefined) {
+				request.write(options.body);
+			}
+
+			request.end();
+		});
+	}
+
 	async request(options: DockerRequestOptions): Promise<DockerRawResponse> {
 		await this.validateConnectionSettings();
 
@@ -968,6 +1089,25 @@ export class DockerApiClient {
 			}
 
 			request.end();
+		});
+	}
+
+	async streamEvents(
+		options: {
+			filters?: string;
+			since?: string;
+			until?: string;
+		},
+		abortSignal?: AbortSignal,
+	): Promise<DockerStreamResponse> {
+		return this.streamRequest({
+			abortSignal,
+			path: '/events',
+			query: {
+				filters: options.filters,
+				since: options.since,
+				until: options.until,
+			},
 		});
 	}
 

@@ -3,6 +3,7 @@ import { NodeOperationError } from 'n8n-workflow';
 
 import { parseDockerRawStream } from '../transport/dockerLogs';
 import type { DockerApiClient, DockerJson } from '../transport/dockerClient';
+import { collectDockerStreamResponse } from '../transport/dockerStreams';
 import type { ContainerOperation } from '../types';
 import { evaluateExecPolicy } from '../utils/execPolicy';
 import {
@@ -458,6 +459,24 @@ function calculateContainerStats(rawStats: DockerJson): IDataObject {
 	};
 }
 
+function toContainerLogItems(
+	containerId: string,
+	itemIndex: number,
+	entries: Array<{ message: string; stream: string }>,
+): INodeExecutionData[] {
+	return entries.map((entry) =>
+		toExecutionItem(
+			{
+				containerId,
+				message: entry.message,
+				operation: 'logs',
+				stream: entry.stream,
+			},
+			itemIndex,
+		),
+	);
+}
+
 export async function executeContainerOperation(
 	context: IExecuteFunctions,
 	client: DockerApiClient,
@@ -510,20 +529,75 @@ export async function executeContainerOperation(
 					{ itemIndex },
 				);
 			}
+			const logsMode = context.getNodeParameter('logsMode', itemIndex, 'snapshot') as
+				| 'followForDuration'
+				| 'snapshot';
+			const logsOutputMode = context.getNodeParameter(
+				'logsOutputMode',
+				itemIndex,
+				'aggregate',
+			) as 'aggregate' | 'splitItems';
+			const logOptions = {
+				follow: logsMode === 'followForDuration',
+				since: trimToUndefined(context.getNodeParameter('since', itemIndex, '') as string),
+				stderr: includeStderr,
+				stdout: includeStdout,
+				tail: trimToUndefined(context.getNodeParameter('tail', itemIndex) as string),
+				timestamps: context.getNodeParameter('timestamps', itemIndex) as boolean,
+				until: trimToUndefined(context.getNodeParameter('until', itemIndex, '') as string),
+			};
+			let rawLogsBody: Buffer;
+			let contentType: string | string[] | undefined;
 
-			const rawLogs = await client.getContainerLogs(
-				containerId,
-				{
-					since: trimToUndefined(context.getNodeParameter('since', itemIndex, '') as string),
-					stderr: includeStderr,
-					stdout: includeStdout,
-					tail: trimToUndefined(context.getNodeParameter('tail', itemIndex) as string),
-					timestamps: context.getNodeParameter('timestamps', itemIndex) as boolean,
-					until: trimToUndefined(context.getNodeParameter('until', itemIndex, '') as string),
-				},
-				abortSignal,
-			);
-			const parsedLogs = parseDockerRawStream(rawLogs.body, rawLogs.headers['content-type']);
+			if (logsMode === 'snapshot') {
+				const rawLogs = await client.getContainerLogs(containerId, logOptions, abortSignal);
+
+				rawLogsBody = rawLogs.body;
+				contentType = rawLogs.headers['content-type'];
+			} else {
+				const followDurationSeconds = normalizePositiveInteger(
+					node,
+					context.getNodeParameter('logsFollowDurationSeconds', itemIndex, 30) as number,
+					'Follow Duration Seconds',
+					itemIndex,
+				);
+				const followAbortController = new AbortController();
+				const timeout = setTimeout(() => {
+					followAbortController.abort();
+				}, followDurationSeconds * 1000);
+				const abortListener = () => {
+					followAbortController.abort();
+				};
+
+				abortSignal?.addEventListener('abort', abortListener, { once: true });
+
+				try {
+					const streamResponse = await client.streamContainerLogs(
+						containerId,
+						logOptions,
+						followAbortController.signal,
+					);
+
+					contentType = streamResponse.headers['content-type'];
+					rawLogsBody = await collectDockerStreamResponse(
+						streamResponse,
+						followAbortController.signal,
+					);
+				} finally {
+					clearTimeout(timeout);
+					abortSignal?.removeEventListener('abort', abortListener);
+				}
+			}
+
+			const parsedLogs = parseDockerRawStream(rawLogsBody, contentType);
+
+			if (logsOutputMode === 'splitItems') {
+				return toContainerLogItems(
+					containerId,
+					itemIndex,
+					parsedLogs.entries as Array<{ message: string; stream: string }>,
+				);
+			}
 
 			return [
 				toExecutionItem(

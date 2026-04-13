@@ -3,6 +3,7 @@ const test = require('node:test');
 
 const { Docker } = require('../dist/nodes/Docker/Docker.node.js');
 const { DockerFiles } = require('../dist/nodes/DockerFiles/DockerFiles.node.js');
+const { DockerTrigger } = require('../dist/nodes/DockerTrigger/DockerTrigger.node.js');
 const { evaluateExecPolicy } = require('../dist/nodes/Docker/utils/execPolicy.js');
 const {
 	createSingleFileTarArchive,
@@ -13,9 +14,14 @@ const {
 test('Docker remains AI-usable while Docker Files is not', () => {
 	const dockerNode = new Docker();
 	const dockerFilesNode = new DockerFiles();
+	const dockerTriggerNode = new DockerTrigger();
 
 	assert.equal(dockerNode.description.usableAsTool, true);
 	assert.notEqual(dockerFilesNode.description.usableAsTool, true);
+	assert.notEqual(dockerTriggerNode.description.usableAsTool, true);
+	assert.deepEqual(dockerTriggerNode.description.group, ['trigger']);
+	assert.deepEqual(dockerTriggerNode.description.inputs, []);
+	assert.deepEqual(dockerTriggerNode.description.outputs, ['main']);
 
 	const dockerContainerOperationProperty = dockerNode.description.properties.find(
 		(property) =>
@@ -80,6 +86,18 @@ test('Docker remains AI-usable while Docker Files is not', () => {
 	assert.deepEqual(
 		dockerFilesImageOperationProperty.options.map((option) => option.value),
 		['load', 'save'],
+	);
+	assert.deepEqual(
+		dockerTriggerNode.description.properties
+			.find((property) => property.name === 'resourceTypes')
+			.options.map((option) => option.value),
+		['container', 'daemon', 'image', 'network', 'volume'],
+	);
+	assert.deepEqual(
+		dockerTriggerNode.description.properties
+			.find((property) => property.name === 'actions')
+			.options.map((option) => option.value),
+		['create', 'destroy', 'die', 'pull', 'remove', 'restart', 'start', 'stop'],
 	);
 });
 

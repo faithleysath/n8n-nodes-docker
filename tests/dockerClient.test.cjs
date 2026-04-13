@@ -11,12 +11,21 @@ const {
 	normalizeDockerApiVersion,
 } = require('../dist/nodes/Docker/transport/dockerClient.js');
 const {
+	DockerJsonLinesDecoder,
 	parseDockerJsonLines,
 } = require('../dist/nodes/Docker/transport/dockerJsonLines.js');
+const {
+	collectDockerStreamResponse,
+	waitForAbortableDelay,
+} = require('../dist/nodes/Docker/transport/dockerStreams.js');
 const {
 	parseDockerLogStream,
 	parseDockerRawStream,
 } = require('../dist/nodes/Docker/transport/dockerLogs.js');
+const {
+	computeDockerReconnectDelayMs,
+	getDockerEventKey,
+} = require('../dist/nodes/Docker/utils/dockerEvents.js');
 
 function createRawStreamFrame(streamType, payload) {
 	const payloadBuffer = Buffer.from(payload, 'utf8');
@@ -93,6 +102,56 @@ test('parseDockerJsonLines parses JSON line streams and preserves raw lines', ()
 	]);
 });
 
+test('DockerJsonLinesDecoder preserves JSON objects across chunk boundaries', () => {
+	const decoder = new DockerJsonLinesDecoder();
+	const firstMessages = decoder.write(
+		Buffer.from('{"Type":"container","Action":"start","time":1}\n{"Type":"cont'),
+	);
+	const secondMessages = decoder.write(Buffer.from('ainer","Action":"stop","time":2}\nnot-json'));
+	const flushedMessages = decoder.flush();
+
+	assert.deepEqual(
+		[...firstMessages, ...secondMessages, ...flushedMessages].map((message) => message.rawLine),
+		[
+			'{"Type":"container","Action":"start","time":1}',
+			'{"Type":"container","Action":"stop","time":2}',
+			'not-json',
+		],
+	);
+	assert.deepEqual(
+		[...firstMessages, ...secondMessages, ...flushedMessages]
+			.filter((message) => message.entry !== undefined)
+			.map((message) => message.entry.Action),
+		['start', 'stop'],
+	);
+});
+
+test('docker event helpers compute dedupe keys and reconnect delays deterministically', () => {
+	assert.equal(
+		getDockerEventKey({
+			Action: 'start',
+			Actor: { ID: 'container-1' },
+			Type: 'container',
+			id: 'container-1',
+			timeNano: 1712982000000000000,
+		}),
+		'1712982000000000000|container|start|container-1|container-1|',
+	);
+	assert.equal(computeDockerReconnectDelayMs(0, () => 0.5), 1125);
+	assert.equal(computeDockerReconnectDelayMs(5, () => 0), 30000);
+});
+
+test('waitForAbortableDelay resolves immediately when the signal is aborted', async () => {
+	const controller = new AbortController();
+
+	controller.abort();
+
+	const startedAt = Date.now();
+	await waitForAbortableDelay(1_000, controller.signal);
+
+	assert.equal(Date.now() - startedAt < 100, true);
+});
+
 test('DockerApiClient negotiates API version over a Unix socket', async () => {
 	const requests = [];
 	const socketDir = mkdtempSync(join(tmpdir(), 'docker-client-socket-'));
@@ -166,6 +225,72 @@ test('DockerApiClient respects explicit API versions for TCP connections', async
 		const info = await client.getInfo();
 
 		assert.deepEqual(info, { ServerVersion: 'test-daemon' });
+	} finally {
+		server.closeAllConnections();
+		server.close();
+	}
+});
+
+test('DockerApiClient streams events and logs without buffering the response upfront', async () => {
+	const server = http.createServer((request, response) => {
+		if (request.method === 'GET' && request.url === '/v1.51/events?since=1712982000') {
+			response.setHeader('content-type', 'application/json');
+			response.write(`${JSON.stringify({ Action: 'start', Type: 'container' })}\n`);
+			response.end(`${JSON.stringify({ Action: 'stop', Type: 'container' })}\n`);
+			return;
+		}
+
+		if (
+			request.method === 'GET' &&
+			request.url === '/v1.51/containers/demo/logs?follow=1&stderr=1&stdout=1&tail=all&timestamps=0'
+		) {
+			response.setHeader('content-type', 'application/vnd.docker.raw-stream');
+			response.end(
+				Buffer.concat([
+					createRawStreamFrame(1, 'stdout line\n'),
+					createRawStreamFrame(2, 'stderr line\n'),
+				]),
+			);
+			return;
+		}
+
+		response.statusCode = 404;
+		response.end(JSON.stringify({ message: 'not found' }));
+	});
+
+	try {
+		await listen(server, undefined, '127.0.0.1');
+
+		const address = server.address();
+		assert.notEqual(address, null);
+		assert.equal(typeof address, 'object');
+
+		const client = new DockerApiClient({
+			apiVersion: '1.51',
+			connectionMode: 'tcp',
+			host: '127.0.0.1',
+			port: address.port,
+		});
+		const eventsResponse = await client.streamEvents({
+			since: '1712982000',
+		});
+		const logsResponse = await client.streamContainerLogs('demo', {
+			follow: true,
+			stderr: true,
+			stdout: true,
+			tail: 'all',
+			timestamps: false,
+		});
+		const eventsBuffer = await collectDockerStreamResponse(eventsResponse);
+		const logsBuffer = await collectDockerStreamResponse(logsResponse);
+		const events = parseDockerJsonLines(eventsBuffer, eventsResponse.headers['content-type']);
+		const logs = parseDockerRawStream(logsBuffer, logsResponse.headers['content-type']);
+
+		assert.deepEqual(events.entries.map((event) => event.Action), ['start', 'stop']);
+		assert.deepEqual(logs.entries, [
+			{ message: 'stdout line', stream: 'stdout' },
+			{ message: 'stderr line', stream: 'stderr' },
+		]);
 	} finally {
 		server.closeAllConnections();
 		server.close();

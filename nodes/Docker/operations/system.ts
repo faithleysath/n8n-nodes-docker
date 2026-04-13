@@ -3,6 +3,16 @@ import { NodeOperationError } from 'n8n-workflow';
 import type { DockerApiClient } from '../transport/dockerClient';
 import { parseDockerJsonLines } from '../transport/dockerJsonLines';
 import type { SystemOperation } from '../types';
+import {
+	createDockerEventFilterPayload,
+	getDockerReplaySince,
+	normalizeDockerEvent,
+	readDockerEventCursorState,
+	recordDockerEvent,
+	type DockerEvent,
+	type DockerEventCursorState,
+	type NormalizedDockerEvent,
+} from '../utils/dockerEvents';
 import { normalizePositiveInteger, toExecutionItem, trimToUndefined } from '../utils/execution';
 
 function resolveEventsWindow(
@@ -52,6 +62,31 @@ function resolveEventsWindow(
 		since: String(Math.max(0, Math.floor(parsedUntil / 1000) - lookbackSeconds)),
 		until,
 	};
+}
+
+function resolveResumeWindow(
+	context: IExecuteFunctions,
+	itemIndex: number,
+	state: DockerEventCursorState,
+): { lookbackSeconds: number; since: string; until: string } {
+	const lookbackSeconds = normalizePositiveInteger(
+		() => context.getNode(),
+		context.getNodeParameter('eventsLookbackSeconds', itemIndex, 300) as number,
+		'Lookback Seconds',
+		itemIndex,
+	);
+	const until = String(Math.floor(Date.now() / 1000));
+	const since = getDockerReplaySince(state) ?? String(Math.max(0, Number(until) - lookbackSeconds));
+
+	return {
+		lookbackSeconds,
+		since,
+		until,
+	};
+}
+
+function toEventItems(events: NormalizedDockerEvent[], itemIndex: number): INodeExecutionData[] {
+	return events.map((event) => toExecutionItem(event as unknown as IDataObject, itemIndex));
 }
 
 export async function executeSystemOperation(
@@ -114,39 +149,78 @@ export async function executeSystemOperation(
 		case 'events': {
 			const resourceTypes = context.getNodeParameter('eventsResourceTypes', itemIndex, []) as string[];
 			const actions = context.getNodeParameter('eventsActions', itemIndex, []) as string[];
-			const window = resolveEventsWindow(context, itemIndex);
-			const filterPayload: Record<string, string[]> = {};
-
-			if (resourceTypes.length > 0) {
-				filterPayload.type = resourceTypes;
-			}
-
-			if (actions.length > 0) {
-				filterPayload.event = actions;
-			}
+			const eventsReadMode = context.getNodeParameter(
+				'eventsReadMode',
+				itemIndex,
+				'boundedWindow',
+			) as 'boundedWindow' | 'resumeFromCursor';
+			const eventsOutputMode = context.getNodeParameter(
+				'eventsOutputMode',
+				itemIndex,
+				'aggregate',
+			) as 'aggregate' | 'splitItems';
+			const staticData =
+				eventsReadMode === 'resumeFromCursor' ? context.getWorkflowStaticData('node') : undefined;
+			let cursorState =
+				staticData === undefined ? undefined : readDockerEventCursorState(staticData);
+			const window =
+				eventsReadMode === 'resumeFromCursor'
+					? resolveResumeWindow(
+							context,
+							itemIndex,
+							cursorState ?? readDockerEventCursorState({}),
+						)
+					: resolveEventsWindow(context, itemIndex);
+			const filters = createDockerEventFilterPayload({
+				actions,
+				resourceTypes,
+			});
 
 			const response = await client.getEvents(
 				{
-					filters: Object.keys(filterPayload).length > 0 ? JSON.stringify(filterPayload) : undefined,
+					filters,
 					since: window.since,
 					until: window.until,
 				},
 				abortSignal,
 			);
 			const parsedEvents = parseDockerJsonLines(response.body, response.headers['content-type']);
+			const normalizedEvents = parsedEvents.entries.map((entry) =>
+				normalizeDockerEvent(entry as DockerEvent),
+			);
+			const selectedEvents: NormalizedDockerEvent[] = [];
+
+			if (cursorState === undefined || staticData === undefined) {
+				selectedEvents.push(...normalizedEvents);
+			} else {
+				for (const event of normalizedEvents) {
+					if (cursorState.recentEventKeys.includes(event.eventKey)) {
+						continue;
+					}
+
+					selectedEvents.push(event);
+					cursorState = recordDockerEvent(staticData, cursorState, event);
+				}
+			}
+
+			if (eventsOutputMode === 'splitItems') {
+				return toEventItems(selectedEvents, itemIndex);
+			}
 
 			return [
 				toExecutionItem(
 					{
 						contentType: parsedEvents.contentType,
-						count: parsedEvents.entries.length,
-						events: parsedEvents.entries as unknown as IDataObject[],
+						count: selectedEvents.length,
+						events: selectedEvents as unknown as IDataObject[],
 						filters: {
 							actions,
 							resourceTypes,
 						},
 						operation: 'events',
+						outputMode: eventsOutputMode,
 						rawLines: parsedEvents.rawLines,
+						readMode: eventsReadMode,
 						unparsedLines: parsedEvents.unparsedLines,
 						window,
 					},

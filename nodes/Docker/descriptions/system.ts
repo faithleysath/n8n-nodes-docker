@@ -33,6 +33,26 @@ function systemOperationDisplay(operation: string[]): INodeProperties['displayOp
 
 export const systemFields: INodeProperties[] = [
 	{
+		displayName: 'Read Mode',
+		name: 'eventsReadMode',
+		type: 'options',
+		default: 'boundedWindow',
+		description: 'How to decide which events to read',
+		displayOptions: systemOperationDisplay(['events']),
+		options: [
+			{
+				name: 'Bounded Window',
+				value: 'boundedWindow',
+				description: 'Read events inside a bounded since/until window',
+			},
+			{
+				name: 'Resume From Cursor',
+				value: 'resumeFromCursor',
+				description: 'Replay from the last stored workflow cursor, then advance it',
+			},
+		],
+	},
+	{
 		displayName: 'Lookback Seconds',
 		name: 'eventsLookbackSeconds',
 		type: 'number',
@@ -40,7 +60,8 @@ export const systemFields: INodeProperties[] = [
 		typeOptions: {
 			minValue: 1,
 		},
-		description: 'How many seconds of historical events to read when Since is not set explicitly',
+		description:
+			'How many seconds of historical events to read when Since is omitted or no stored cursor exists',
 		displayOptions: systemOperationDisplay(['events']),
 	},
 	{
@@ -50,7 +71,13 @@ export const systemFields: INodeProperties[] = [
 		default: '',
 		placeholder: '1712978400 or 2026-04-13T06:00:00Z',
 		description: 'Only return events created since this timestamp',
-		displayOptions: systemOperationDisplay(['events']),
+		displayOptions: {
+			show: {
+				eventsReadMode: ['boundedWindow'],
+				operation: ['events'],
+				resource: ['system'],
+			},
+		},
 	},
 	{
 		displayName: 'Until',
@@ -59,7 +86,13 @@ export const systemFields: INodeProperties[] = [
 		default: '',
 		placeholder: '1712982000 or 2026-04-13T07:00:00Z',
 		description: 'Only return events created before this timestamp. Defaults to now for bounded reads.',
-		displayOptions: systemOperationDisplay(['events']),
+		displayOptions: {
+			show: {
+				eventsReadMode: ['boundedWindow'],
+				operation: ['events'],
+				resource: ['system'],
+			},
+		},
 	},
 	{
 		displayName: 'Resource Types',
@@ -103,6 +136,26 @@ export const systemFields: INodeProperties[] = [
 			{ name: 'Unmount', value: 'unmount' },
 			{ name: 'Untag', value: 'untag' },
 			{ name: 'Update', value: 'update' },
+		],
+	},
+	{
+		displayName: 'Output Mode',
+		name: 'eventsOutputMode',
+		type: 'options',
+		default: 'aggregate',
+		description: 'How to return the matched events',
+		displayOptions: systemOperationDisplay(['events']),
+		options: [
+			{
+				name: 'Aggregate',
+				value: 'aggregate',
+				description: 'Return one item that contains the full event batch',
+			},
+			{
+				name: 'Split Items',
+				value: 'splitItems',
+				description: 'Return one item per Docker event',
+			},
 		],
 	},
 ];

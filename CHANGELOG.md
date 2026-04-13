@@ -1,3 +1,11 @@
+## 0.5.0 - 2026-04-13
+
+- Added a dedicated `Docker Trigger` node with Docker event filters, stored cursor replay, duplicate suppression, manual trigger support, and reconnect backoff
+- Extended the main `Docker` node with `container:logs` snapshot/follow modes plus aggregate/split output, and `system:events` bounded/resume-from-cursor read modes
+- Added streaming transport helpers for Docker events and logs, plus incremental JSON-line decoding for long-lived event streams
+- Expanded automated coverage across trigger behavior, cursor updates, reconnect handling, split log/event outputs, and optional Phase 4 integration scenarios
+- Updated package metadata, README, architecture docs, roadmap, and operations matrix for the `0.5.x` Phase 4 release surface
+
 ## 0.4.1 - 2026-04-13
 
 - Completed the Phase 3 Docker resource surface on the main `Docker` node with `image`, `network`, `volume`, and expanded `system` operations
