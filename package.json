@@ -1,0 +1,55 @@
+{
+	"name": "n8n-nodes-docker",
+	"version": "0.1.0",
+	"description": "Docker community nodes for n8n self-hosted instances",
+	"license": "MIT",
+	"homepage": "https://github.com/your-org/n8n-nodes-docker",
+	"keywords": [
+		"n8n-community-node-package",
+		"n8n",
+		"docker",
+		"containers",
+		"devops",
+		"infrastructure"
+	],
+	"author": {
+		"name": "吴天一",
+		"email": "faithleysath@gmail.com"
+	},
+	"repository": {
+		"type": "git",
+		"url": "https://github.com/your-org/n8n-nodes-docker.git"
+	},
+	"scripts": {
+		"build": "n8n-node build",
+		"build:watch": "tsc --watch",
+		"dev": "n8n-node dev",
+		"lint": "n8n-node lint",
+		"lint:fix": "n8n-node lint --fix",
+		"release": "n8n-node release",
+		"prepublishOnly": "n8n-node prerelease"
+	},
+	"files": [
+		"dist"
+	],
+	"n8n": {
+		"n8nNodesApiVersion": 1,
+		"strict": false,
+		"credentials": [
+			"dist/credentials/DockerApi.credentials.js"
+		],
+		"nodes": [
+			"dist/nodes/Docker/Docker.node.js"
+		]
+	},
+	"devDependencies": {
+		"@n8n/node-cli": "*",
+		"eslint": "9.32.0",
+		"prettier": "3.6.2",
+		"release-it": "^19.0.4",
+		"typescript": "5.9.2"
+	},
+	"peerDependencies": {
+		"n8n-workflow": "*"
+	}
+}
