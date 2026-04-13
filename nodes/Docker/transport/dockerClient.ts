@@ -7,7 +7,7 @@ import { URLSearchParams } from 'node:url';
 
 export type DockerConnectionMode = 'unixSocket' | 'tcp' | 'tls' | 'ssh';
 export type DockerAccessMode = 'readOnly' | 'fullControl';
-export type DockerRequestMethod = 'DELETE' | 'GET' | 'POST';
+export type DockerRequestMethod = 'DELETE' | 'GET' | 'HEAD' | 'POST' | 'PUT';
 export type DockerJson = Record<string, unknown>;
 
 export interface DockerCredentials {
@@ -58,6 +58,22 @@ export interface DockerPingResponse {
 export interface DockerActionResult {
 	changed: boolean;
 	statusCode: number;
+}
+
+export interface DockerContainerCreateResponse extends DockerJson {
+	Id?: string;
+	Warnings?: string[];
+}
+
+export interface DockerExecCreateResponse extends DockerJson {
+	Id?: string;
+}
+
+export interface DockerExecInspectResponse extends DockerJson {
+	ContainerID?: string;
+	ExitCode?: number;
+	ID?: string;
+	Running?: boolean;
 }
 
 export class DockerRequestError extends Error {
@@ -241,6 +257,85 @@ export class DockerApiClient {
 		});
 	}
 
+	async topContainer(
+		containerId: string,
+		options: { psArgs?: string },
+		abortSignal?: AbortSignal,
+	): Promise<DockerJson> {
+		return this.requestJson<DockerJson>({
+			abortSignal,
+			path: `/containers/${encodeURIComponent(containerId)}/top`,
+			query: {
+				ps_args: options.psArgs,
+			},
+		});
+	}
+
+	async getContainerStats(
+		containerId: string,
+		options: { oneShot: boolean },
+		abortSignal?: AbortSignal,
+	): Promise<DockerJson> {
+		return this.requestJson<DockerJson>({
+			abortSignal,
+			path: `/containers/${encodeURIComponent(containerId)}/stats`,
+			query: {
+				'one-shot': options.oneShot,
+				stream: false,
+			},
+		});
+	}
+
+	async waitForContainer(
+		containerId: string,
+		options: { condition?: string },
+		abortSignal?: AbortSignal,
+	): Promise<DockerJson> {
+		return this.requestJson<DockerJson>({
+			abortSignal,
+			method: 'POST',
+			path: `/containers/${encodeURIComponent(containerId)}/wait`,
+			query: {
+				condition: options.condition,
+			},
+		});
+	}
+
+	async createContainer(
+		options: { body: DockerJson; name?: string; platform?: string },
+		abortSignal?: AbortSignal,
+	): Promise<DockerContainerCreateResponse> {
+		return this.requestJson<DockerContainerCreateResponse>({
+			abortSignal,
+			body: JSON.stringify(options.body),
+			headers: {
+				'Content-Type': 'application/json',
+			},
+			method: 'POST',
+			path: '/containers/create',
+			query: {
+				name: options.name,
+				platform: options.platform,
+			},
+		});
+	}
+
+	async updateContainer(
+		containerId: string,
+		body: DockerJson,
+		abortSignal?: AbortSignal,
+	): Promise<DockerJson> {
+		return this.requestJson<DockerJson>({
+			abortSignal,
+			body: JSON.stringify(body),
+			headers: {
+				'Content-Type': 'application/json',
+			},
+			method: 'POST',
+			path: `/containers/${encodeURIComponent(containerId)}/update`,
+		});
+	}
+
 	async startContainer(containerId: string, abortSignal?: AbortSignal): Promise<DockerActionResult> {
 		return this.requestNoContent({
 			abortSignal,
@@ -324,9 +419,123 @@ export class DockerApiClient {
 		});
 	}
 
-	private async requestJson<T extends DockerJson | DockerJson[]>(
-		options: DockerRequestOptions,
-	): Promise<T> {
+	async createContainerExec(
+		containerId: string,
+		body: DockerJson,
+		abortSignal?: AbortSignal,
+	): Promise<DockerExecCreateResponse> {
+		return this.requestJson<DockerExecCreateResponse>({
+			abortSignal,
+			body: JSON.stringify(body),
+			headers: {
+				'Content-Type': 'application/json',
+			},
+			method: 'POST',
+			path: `/containers/${encodeURIComponent(containerId)}/exec`,
+		});
+	}
+
+	async startContainerExec(
+		execId: string,
+		body: DockerJson,
+		abortSignal?: AbortSignal,
+	): Promise<DockerRawResponse> {
+		return this.request({
+			abortSignal,
+			body: JSON.stringify(body),
+			headers: {
+				'Content-Type': 'application/json',
+			},
+			method: 'POST',
+			path: `/exec/${encodeURIComponent(execId)}/start`,
+		});
+	}
+
+	async inspectContainerExec(
+		execId: string,
+		abortSignal?: AbortSignal,
+	): Promise<DockerExecInspectResponse> {
+		return this.requestJson<DockerExecInspectResponse>({
+			abortSignal,
+			path: `/exec/${encodeURIComponent(execId)}/json`,
+		});
+	}
+
+	async getContainerArchiveInfo(
+		containerId: string,
+		options: { path: string },
+		abortSignal?: AbortSignal,
+	): Promise<DockerRawResponse> {
+		return this.request({
+			abortSignal,
+			method: 'HEAD',
+			path: `/containers/${encodeURIComponent(containerId)}/archive`,
+			query: {
+				path: options.path,
+			},
+		});
+	}
+
+	async getContainerArchive(
+		containerId: string,
+		options: { path: string },
+		abortSignal?: AbortSignal,
+	): Promise<DockerRawResponse> {
+		return this.request({
+			abortSignal,
+			headers: {
+				Accept: 'application/x-tar',
+			},
+			path: `/containers/${encodeURIComponent(containerId)}/archive`,
+			query: {
+				path: options.path,
+			},
+		});
+	}
+
+	async putContainerArchive(
+		containerId: string,
+		options: {
+			body: Buffer;
+			copyUidGid?: boolean;
+			noOverwriteDirNonDir?: boolean;
+			path: string;
+		},
+		abortSignal?: AbortSignal,
+	): Promise<DockerActionResult> {
+		const response = await this.request({
+			abortSignal,
+			body: options.body,
+			expectedStatusCodes: [200],
+			headers: {
+				'Content-Type': 'application/x-tar',
+			},
+			method: 'PUT',
+			path: `/containers/${encodeURIComponent(containerId)}/archive`,
+			query: {
+				copyUIDGID: options.copyUidGid,
+				noOverwriteDirNonDir: options.noOverwriteDirNonDir,
+				path: options.path,
+			},
+		});
+
+		return {
+			changed: response.statusCode === 200,
+			statusCode: response.statusCode,
+		};
+	}
+
+	async exportContainer(containerId: string, abortSignal?: AbortSignal): Promise<DockerRawResponse> {
+		return this.request({
+			abortSignal,
+			headers: {
+				Accept: 'application/octet-stream',
+			},
+			path: `/containers/${encodeURIComponent(containerId)}/export`,
+		});
+	}
+
+	private async requestJson<T>(options: DockerRequestOptions): Promise<T> {
 		const response = await this.request(options);
 		const parsed = parseJsonIfPossible(response.body);
 
@@ -353,7 +562,11 @@ export class DockerApiClient {
 		await this.validateConnectionSettings();
 
 		const method = options.method ?? 'GET';
-		const requestPath = await this.buildRequestPath(options.path, options.query, options.versioned ?? true);
+		const requestPath = await this.buildRequestPath(
+			options.path,
+			options.query,
+			options.versioned ?? true,
+		);
 		const requestOptions = this.buildRequestOptions(method, requestPath, options);
 		const requestFn = this.credentials.connectionMode === 'tls' ? httpsRequest : httpRequest;
 
@@ -384,16 +597,13 @@ export class DockerApiClient {
 									: JSON.stringify(parsedBody);
 
 						reject(
-							new DockerRequestError(
-								`Docker API request failed with status ${statusCode}.`,
-								{
-									bodyText,
-									details: parsedBody,
-									method,
-									path: requestPath,
-									statusCode,
-								},
-							),
+							new DockerRequestError(`Docker API request failed with status ${statusCode}.`, {
+								bodyText,
+								details: parsedBody,
+								method,
+								path: requestPath,
+								statusCode,
+							}),
 						);
 
 						return;
@@ -477,6 +687,7 @@ export class DockerApiClient {
 			ca: trimToUndefined(this.credentials.ca),
 			cert: trimToUndefined(this.credentials.cert),
 			headers,
+			hostname,
 			key: trimToUndefined(this.credentials.key),
 			method,
 			passphrase: trimToUndefined(this.credentials.passphrase),
@@ -484,7 +695,6 @@ export class DockerApiClient {
 			port,
 			rejectUnauthorized: isTls ? !this.credentials.ignoreTlsIssues : true,
 			signal: options.abortSignal,
-			hostname,
 		};
 	}
 
@@ -537,7 +747,10 @@ export class DockerApiClient {
 						throw new Error('Host is required for TCP and TLS modes.');
 					}
 
-					const port = normalizePort(this.credentials.port, this.credentials.connectionMode === 'tls' ? 2376 : 2375);
+					const port = normalizePort(
+						this.credentials.port,
+						this.credentials.connectionMode === 'tls' ? 2376 : 2375,
+					);
 
 					if (!Number.isInteger(port) || port <= 0) {
 						throw new Error('Port must be a positive integer.');

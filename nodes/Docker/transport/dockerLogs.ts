@@ -9,11 +9,13 @@ export interface ParsedDockerLogStream {
 	contentType?: string;
 	entries: DockerLogEntry[];
 	multiplexed: boolean;
+	streamText: Record<DockerLogStream, string>;
 	text: string;
 }
 
 interface ParsedFrame {
 	entries: DockerLogEntry[];
+	streamText: Record<DockerLogStream, string>;
 	text: string;
 }
 
@@ -35,8 +37,8 @@ function splitLogChunk(stream: DockerLogStream, chunk: string): DockerLogEntry[]
 		}
 
 		entries.push({
-			stream,
 			message,
+			stream,
 		});
 	}
 
@@ -64,6 +66,12 @@ function tryParseRawStream(buffer: Buffer): ParsedFrame | null {
 	let offset = 0;
 	const textChunks: string[] = [];
 	const entries: DockerLogEntry[] = [];
+	const streamText: Record<DockerLogStream, string> = {
+		stderr: '',
+		stdout: '',
+		system: '',
+		unknown: '',
+	};
 
 	while (offset < buffer.length) {
 		if (offset + 8 > buffer.length) {
@@ -84,17 +92,19 @@ function tryParseRawStream(buffer: Buffer): ParsedFrame | null {
 
 		textChunks.push(chunk);
 		entries.push(...splitLogChunk(stream, chunk));
+		streamText[stream] += chunk;
 
 		offset = payloadEnd;
 	}
 
 	return {
 		entries,
+		streamText,
 		text: textChunks.join(''),
 	};
 }
 
-export function parseDockerLogStream(
+export function parseDockerRawStream(
 	buffer: Buffer,
 	contentType?: string | string[],
 ): ParsedDockerLogStream {
@@ -106,6 +116,7 @@ export function parseDockerLogStream(
 			contentType: normalizedContentType,
 			entries: parsedRawStream.entries,
 			multiplexed: true,
+			streamText: parsedRawStream.streamText,
 			text: parsedRawStream.text,
 		};
 	}
@@ -116,6 +127,19 @@ export function parseDockerLogStream(
 		contentType: normalizedContentType,
 		entries: splitLogChunk('stdout', text),
 		multiplexed: false,
+		streamText: {
+			stderr: '',
+			stdout: text,
+			system: '',
+			unknown: '',
+		},
 		text,
 	};
+}
+
+export function parseDockerLogStream(
+	buffer: Buffer,
+	contentType?: string | string[],
+): ParsedDockerLogStream {
+	return parseDockerRawStream(buffer, contentType);
 }

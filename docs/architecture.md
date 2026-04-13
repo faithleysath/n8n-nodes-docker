@@ -45,7 +45,22 @@
 - 它的执行模型和普通 action node 不同
 - 需要处理长连接、重连、过滤器、事件去重
 
-### 2.3 `Docker Build`
+### 2.3 `Docker Files`
+
+职责：
+
+- `copyTo`
+- `copyFrom`
+- `export`
+- tar / binary 转换
+
+为什么单独拆：
+
+- 这些操作直接读写 n8n binary data
+- 默认输出不是 JSON，而是 tar 或单文件 binary
+- 需要把二进制文件能力和 AI tool 可调用面分离
+
+### 2.4 `Docker Build`
 
 职责：
 
@@ -115,26 +130,22 @@ nodes/Docker/
 ├── Docker.node.ts
 ├── Docker.node.json
 ├── descriptions/
-│   ├── ContainerDescription.ts
-│   ├── ImageDescription.ts
-│   ├── NetworkDescription.ts
-│   ├── VolumeDescription.ts
-│   └── SystemDescription.ts
+│   ├── container.ts
+│   └── system.ts
+├── operations/
+│   ├── container.ts
+│   └── system.ts
 ├── transport/
 │   ├── dockerClient.ts
-│   ├── dockerHttp.ts
-│   └── auth.ts
-├── operations/
-│   ├── container/
-│   ├── image/
-│   ├── network/
-│   ├── volume/
-│   └── system/
-└── utils/
-    ├── binary.ts
-    ├── streams.ts
-    ├── filters.ts
-    └── errors.ts
+│   └── dockerLogs.ts
+├── utils/
+│   ├── execPolicy.ts
+│   ├── execution.ts
+│   ├── merge.ts
+│   └── tar.ts
+nodes/DockerFiles/
+├── DockerFiles.node.ts
+└── DockerFiles.node.json
 ```
 
 ### 节点层
@@ -232,7 +243,7 @@ Docker 文件导入导出不能只按普通文本字段来做，必须和 n8n bi
 - `split`
   每条日志/事件一条 item，便于过滤、告警、路由
 
-文件相关操作返回 binary。
+文件相关操作返回 binary，并单独放入 `Docker Files` 节点。
 
 ## 8. 安全设计
 
@@ -241,9 +252,10 @@ Docker 文件导入导出不能只按普通文本字段来做，必须和 n8n bi
 建议执行层保留这些 guardrail：
 
 - `readOnly` 凭证默认禁止写操作
-- `fullControl` 才允许 `create / delete / exec / copyTo / prune`
+- `fullControl` 才允许 `create / delete / exec / copyTo / copyFrom / export / prune`
 - `system prune`、`image remove`、`container remove --force` 等危险动作必须单独显式参数开启
-- 不默认启用 AI tool 模式
+- `Docker` 主节点默认启用 AI tool 模式，但只暴露非 binary 的 JSON / 文本操作
+- `Docker Files` 节点不启用 AI tool 模式
 
 ## 9. 测试策略
 

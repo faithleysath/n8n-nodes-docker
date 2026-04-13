@@ -6,7 +6,8 @@
 
 | 节点 | Phase 1 | Phase 2 | Phase 3 | Phase 4 | Phase 5 | Phase 6 |
 | --- | --- | --- | --- | --- | --- | --- |
-| Docker | MVP | 扩展 container | 完整核心资源 | 流式增强 | 与 Build 联动 | 成熟化 |
+| Docker | MVP | AI-usable container 深化 | 完整核心资源 | 流式增强 | 与 Build 联动 | 成熟化 |
+| Docker Files | - | 首发（二进制 container 文件） | 扩展 | 扩展 | 与 Build 联动 | 成熟化 |
 | Docker Trigger | - | - | 规划 | 首发 | 强化 | 成熟化 |
 | Docker Build | - | - | 规划 | 规划 | 首发 | 成熟化 |
 | Docker Registry | - | - | - | - | 可选 | 可选 |

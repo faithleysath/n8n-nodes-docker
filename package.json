@@ -1,6 +1,6 @@
 {
 	"name": "@faithleysath/n8n-nodes-docker",
-	"version": "0.2.0",
+	"version": "0.3.1",
 	"description": "Docker community nodes for n8n self-hosted instances",
 	"license": "MIT",
 	"homepage": "https://github.com/faithleysath/n8n-nodes-docker",
@@ -48,11 +48,13 @@
 			"dist/credentials/DockerApi.credentials.js"
 		],
 		"nodes": [
-			"dist/nodes/Docker/Docker.node.js"
+			"dist/nodes/Docker/Docker.node.js",
+			"dist/nodes/DockerFiles/DockerFiles.node.js"
 		]
 	},
 	"devDependencies": {
 		"@n8n/node-cli": "*",
+		"@types/tar-stream": "^3.1.4",
 		"eslint": "9.32.0",
 		"prettier": "3.6.2",
 		"release-it": "^19.0.4",
@@ -60,5 +62,8 @@
 	},
 	"peerDependencies": {
 		"n8n-workflow": "*"
+	},
+	"dependencies": {
+		"tar-stream": "^3.1.8"
 	}
 }

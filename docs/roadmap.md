@@ -59,6 +59,11 @@
 
 ## Phase 2: Container Deepening
 
+当前实现说明：
+
+- `Docker` 主节点承接非 binary 的 container deepening，并保持 AI tool 可调用
+- `Docker Files` 节点承接 `copyTo`、`copyFrom`、`export` 这类 binary / tar 工作流
+
 ### 目标
 
 把容器能力从“基础运维”升级到“工作流可编排的完整容器操作集”。
@@ -91,6 +96,7 @@
 
 - exec 参数模型
 - binary 文件导入导出能力
+- `Docker Files` 节点首发
 - 更好的 continue-on-fail 行为
 - 更细的错误映射
 
