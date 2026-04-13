@@ -14,9 +14,15 @@ import {
 } from 'n8n-workflow';
 
 import { containerFields, containerOperations } from './descriptions/container';
-import { systemOperations } from './descriptions/system';
+import { imageFields, imageOperations } from './descriptions/image';
+import { networkFields, networkOperations } from './descriptions/network';
+import { systemFields, systemOperations } from './descriptions/system';
+import { volumeFields, volumeOperations } from './descriptions/volume';
 import { executeContainerOperation } from './operations/container';
+import { executeImageOperation } from './operations/image';
+import { executeNetworkOperation } from './operations/network';
 import { executeSystemOperation } from './operations/system';
+import { executeVolumeOperation } from './operations/volume';
 import {
 	DockerApiClient,
 	DockerRequestError,
@@ -26,7 +32,10 @@ import type {
 	ContainerOperation,
 	DockerOperation,
 	DockerResource,
+	ImageOperation,
+	NetworkOperation,
 	SystemOperation,
+	VolumeOperation,
 } from './types';
 import {
 	createContinueOnFailItem,
@@ -42,7 +51,7 @@ export class Docker implements INodeType {
 		version: 1,
 		subtitle: '={{$parameter["operation"] + ": " + $parameter["resource"]}}',
 		description:
-			'Manage Docker containers and daemon metadata with Unix socket, TCP, or TLS connections',
+			'Manage Docker containers, images, networks, volumes, and daemon metadata with Unix socket, TCP, or TLS connections',
 		defaults: {
 			name: 'Docker',
 		},
@@ -59,7 +68,7 @@ export class Docker implements INodeType {
 		properties: [
 			{
 				displayName:
-					'Phase 2 keeps this main Docker node AI-usable for non-binary operations. File import/export is split into a separate Docker Files node, while this node now covers container lifecycle, exec, create/update, stats, top, wait, and daemon metadata.',
+					'Phase 3 keeps this main Docker node AI-usable for JSON and text operations across containers, images, networks, volumes, and daemon metadata. Binary image save/load and filesystem tar workflows stay isolated in Docker Files.',
 				name: 'phaseTwoNotice',
 				type: 'notice',
 				default: '',
@@ -72,12 +81,22 @@ export class Docker implements INodeType {
 				default: 'container',
 				options: [
 					{ name: 'Container', value: 'container' },
+					{ name: 'Image', value: 'image' },
+					{ name: 'Network', value: 'network' },
 					{ name: 'System', value: 'system' },
+					{ name: 'Volume', value: 'volume' },
 				],
 			},
 			...containerOperations,
+			...imageOperations,
+			...networkOperations,
 			...systemOperations,
+			...volumeOperations,
 			...containerFields,
+			...imageFields,
+			...networkFields,
+			...systemFields,
+			...volumeFields,
 		],
 	};
 
@@ -131,7 +150,28 @@ export class Docker implements INodeType {
 								itemIndex,
 								operation as ContainerOperation,
 							)
-						: await executeSystemOperation(this, client, itemIndex, operation as SystemOperation);
+						: resource === 'image'
+							? await executeImageOperation(this, client, itemIndex, operation as ImageOperation)
+							: resource === 'network'
+								? await executeNetworkOperation(
+										this,
+										client,
+										itemIndex,
+										operation as NetworkOperation,
+									)
+								: resource === 'system'
+									? await executeSystemOperation(
+											this,
+											client,
+											itemIndex,
+											operation as SystemOperation,
+										)
+									: await executeVolumeOperation(
+											this,
+											client,
+											itemIndex,
+											operation as VolumeOperation,
+										);
 
 				returnData.push(...operationResult);
 			} catch (error) {

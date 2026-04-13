@@ -1,4 +1,4 @@
-export type DockerResource = 'container' | 'system';
+export type DockerResource = 'container' | 'image' | 'network' | 'system' | 'volume';
 
 export type ContainerOperation =
 	| 'create'
@@ -15,16 +15,47 @@ export type ContainerOperation =
 	| 'update'
 	| 'wait';
 
-export type SystemOperation = 'info' | 'ping' | 'version';
+export type ImageOperation =
+	| 'history'
+	| 'inspect'
+	| 'list'
+	| 'pull'
+	| 'prune'
+	| 'remove'
+	| 'tag';
 
-export type DockerOperation = ContainerOperation | SystemOperation;
+export type NetworkOperation =
+	| 'connect'
+	| 'create'
+	| 'delete'
+	| 'disconnect'
+	| 'inspect'
+	| 'list'
+	| 'prune';
 
-export const writableContainerOperations = new Set<ContainerOperation>([
+export type VolumeOperation = 'create' | 'delete' | 'inspect' | 'list' | 'prune';
+
+export type SystemOperation = 'df' | 'events' | 'info' | 'ping' | 'version';
+
+export type DockerOperation =
+	| ContainerOperation
+	| ImageOperation
+	| NetworkOperation
+	| SystemOperation
+	| VolumeOperation;
+
+export const writableDockerOperations = new Set<DockerOperation>([
 	'create',
+	'connect',
+	'delete',
+	'disconnect',
 	'exec',
+	'pull',
+	'prune',
 	'remove',
 	'restart',
 	'start',
 	'stop',
+	'tag',
 	'update',
 ]);

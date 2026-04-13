@@ -440,3 +440,417 @@ test('Docker Files surfaces Docker request metadata in continue-on-fail payloads
 		},
 	);
 });
+
+test('Docker image pull aggregates JSON-line progress output at the node boundary', async () => {
+	const dockerNode = new Docker();
+	const progressBody = Buffer.from(
+		[
+			JSON.stringify({ id: 'alpine:3.20', status: 'Pulling from library/alpine' }),
+			JSON.stringify({ status: 'Digest: sha256:abc123' }),
+			'',
+		].join('\n'),
+		'utf8',
+	);
+	const context = createExecuteContext({
+		node: createNodeMetadata('Docker', 'docker'),
+		parameters: {
+			imagePlatform: '',
+			imageReference: 'alpine:3.20',
+			operation: 'pull',
+			resource: 'image',
+		},
+	});
+
+	await withPatchedDockerClient(
+		{
+			accessMode: {
+				get() {
+					return 'fullControl';
+				},
+			},
+			async inspectImage(imageReference) {
+				assert.equal(imageReference, 'alpine:3.20');
+				return { Id: 'sha256:abc123', RepoTags: ['alpine:3.20'] };
+			},
+			async pullImage(options) {
+				assert.deepEqual(options, {
+					fromImage: 'alpine:3.20',
+					platform: undefined,
+				});
+
+				return {
+					body: progressBody,
+					headers: {
+						'content-type': 'application/json',
+					},
+					statusCode: 200,
+				};
+			},
+		},
+		async () => {
+			const [items] = await dockerNode.execute.call(context);
+
+			assert.equal(items.length, 1);
+			assert.equal(items[0].json.operation, 'pull');
+			assert.equal(items[0].json.imageReference, 'alpine:3.20');
+			assert.equal(items[0].json.messageCount, 2);
+			assert.deepEqual(items[0].json.rawLines, [
+				'{"id":"alpine:3.20","status":"Pulling from library/alpine"}',
+				'{"status":"Digest: sha256:abc123"}',
+			]);
+			assert.deepEqual(items[0].json.image, {
+				Id: 'sha256:abc123',
+				RepoTags: ['alpine:3.20'],
+			});
+		},
+	);
+});
+
+test('Docker system events computes a bounded window and aggregates events into one item', async () => {
+	const dockerNode = new Docker();
+	const captured = {};
+	const context = createExecuteContext({
+		node: createNodeMetadata('Docker', 'docker'),
+		parameters: {
+			eventsActions: ['start', 'stop'],
+			eventsLookbackSeconds: 300,
+			eventsResourceTypes: ['container'],
+			eventsUntil: '1712982000',
+			operation: 'events',
+			resource: 'system',
+		},
+	});
+
+	await withPatchedDockerClient(
+		{
+			async getEvents(options) {
+				captured.getEvents = options;
+				return {
+					body: Buffer.from(
+						[
+							JSON.stringify({ Action: 'start', Type: 'container', id: 'container-1' }),
+							JSON.stringify({ Action: 'stop', Type: 'container', id: 'container-1' }),
+							'',
+						].join('\n'),
+					),
+					headers: {
+						'content-type': 'application/json',
+					},
+					statusCode: 200,
+				};
+			},
+		},
+		async () => {
+			const [items] = await dockerNode.execute.call(context);
+
+			assert.equal(items.length, 1);
+			assert.equal(items[0].json.operation, 'events');
+			assert.equal(items[0].json.count, 2);
+			assert.deepEqual(items[0].json.filters, {
+				actions: ['start', 'stop'],
+				resourceTypes: ['container'],
+			});
+			assert.deepEqual(items[0].json.window, {
+				lookbackSeconds: 300,
+				since: '1712981700',
+				until: '1712982000',
+			});
+			assert.deepEqual(captured.getEvents, {
+				filters: JSON.stringify({
+					type: ['container'],
+					event: ['start', 'stop'],
+				}),
+				since: '1712981700',
+				until: '1712982000',
+			});
+		},
+	);
+});
+
+test('Docker network connect builds the expected endpoint payload', async () => {
+	const dockerNode = new Docker();
+	const captured = {};
+	const context = createExecuteContext({
+		node: createNodeMetadata('Docker', 'docker'),
+		parameters: {
+			networkAliases: {
+				values: [{ value: 'worker' }],
+			},
+			networkConnectAdvancedJson: '{}',
+			networkContainerId: 'container-1',
+			networkId: 'workflow-net',
+			networkIpv4Address: '172.24.56.89',
+			networkIpv6Address: '',
+			operation: 'connect',
+			resource: 'network',
+		},
+	});
+
+	await withPatchedDockerClient(
+		{
+			accessMode: {
+				get() {
+					return 'fullControl';
+				},
+			},
+			async connectNetwork(networkId, body) {
+				captured.connectNetwork = { body, networkId };
+				return { changed: true, statusCode: 200 };
+			},
+			async inspectNetwork(networkId) {
+				return { Id: 'network-1', Name: networkId };
+			},
+		},
+		async () => {
+			const [items] = await dockerNode.execute.call(context);
+
+			assert.equal(items.length, 1);
+			assert.equal(items[0].json.operation, 'connect');
+			assert.equal(items[0].json.networkId, 'workflow-net');
+			assert.equal(items[0].json.containerId, 'container-1');
+			assert.deepEqual(captured.connectNetwork, {
+				body: {
+					Container: 'container-1',
+					EndpointConfig: {
+						Aliases: ['worker'],
+						IPAMConfig: {
+							IPv4Address: '172.24.56.89',
+						},
+					},
+				},
+				networkId: 'workflow-net',
+			});
+		},
+	);
+});
+
+test('Docker volume create builds driver options and labels', async () => {
+	const dockerNode = new Docker();
+	const captured = {};
+	const context = createExecuteContext({
+		node: createNodeMetadata('Docker', 'docker'),
+		parameters: {
+			operation: 'create',
+			resource: 'volume',
+			volumeAdvancedJson: '{}',
+			volumeDriver: 'local',
+			volumeDriverOptions: {
+				values: [{ name: 'type', value: 'tmpfs' }],
+			},
+			volumeLabels: {
+				values: [{ name: 'team', value: 'ops' }],
+			},
+			volumeName: 'workflow-data',
+		},
+	});
+
+	await withPatchedDockerClient(
+		{
+			accessMode: {
+				get() {
+					return 'fullControl';
+				},
+			},
+			async createVolume(body) {
+				captured.createVolume = body;
+				return { Driver: 'local', Labels: { team: 'ops' }, Name: 'workflow-data' };
+			},
+		},
+		async () => {
+			const [items] = await dockerNode.execute.call(context);
+
+			assert.equal(items.length, 1);
+			assert.equal(items[0].json.operation, 'create');
+			assert.equal(items[0].json.Name, 'workflow-data');
+			assert.deepEqual(captured.createVolume, {
+				Driver: 'local',
+				DriverOpts: {
+					type: 'tmpfs',
+				},
+				Labels: {
+					team: 'ops',
+				},
+				Name: 'workflow-data',
+			});
+		},
+	);
+});
+
+test('Docker container create includes named volume mounts in HostConfig', async () => {
+	const dockerNode = new Docker();
+	const captured = {};
+	const context = createExecuteContext({
+		node: createNodeMetadata('Docker', 'docker'),
+		parameters: {
+			createAdvancedJson: '{}',
+			createAutoRemove: false,
+			createBindMounts: { values: [] },
+			createCommandArgs: { values: [] },
+			createEnv: { values: [] },
+			createImage: 'alpine:3.20',
+			createLabels: { values: [] },
+			createName: 'demo',
+			createNetworkMode: '',
+			createOpenStdin: false,
+			createPortBindings: { values: [] },
+			createRestartPolicyMaximumRetryCount: 0,
+			createRestartPolicyName: '',
+			createTty: false,
+			createUser: '',
+			createVolumeMounts: {
+				values: [{ readOnly: true, source: 'workflow-data', target: '/data' }],
+			},
+			createWorkingDir: '',
+			operation: 'create',
+			resource: 'container',
+		},
+	});
+
+	await withPatchedDockerClient(
+		{
+			accessMode: {
+				get() {
+					return 'fullControl';
+				},
+			},
+			async createContainer(options) {
+				captured.createContainer = options;
+				return { Id: 'container-1', Warnings: [] };
+			},
+			async inspectContainer() {
+				return { Id: 'container-1', Name: '/demo' };
+			},
+		},
+		async () => {
+			const [items] = await dockerNode.execute.call(context);
+
+			assert.equal(items.length, 1);
+			assert.equal(items[0].json.operation, 'create');
+			assert.deepEqual(captured.createContainer.body.HostConfig.Mounts, [
+				{
+					ReadOnly: true,
+					Source: 'workflow-data',
+					Target: '/data',
+					Type: 'volume',
+				},
+			]);
+		},
+	);
+});
+
+test('Docker Files image save returns a tar binary payload', async () => {
+	const dockerFilesNode = new DockerFiles();
+	const archiveBody = Buffer.from('image-archive', 'utf8');
+	const context = createExecuteContext({
+		node: createNodeMetadata('Docker Files', 'dockerFiles'),
+		parameters: {
+			imageReferences: {
+				values: [{ value: 'alpine:3.20' }, { value: 'busybox:latest' }],
+			},
+			operation: 'save',
+			outputBinaryPropertyName: 'archive',
+			resource: 'image',
+			saveFileName: 'images.tar',
+		},
+	});
+
+	await withPatchedDockerClient(
+		{
+			accessMode: {
+				get() {
+					return 'fullControl';
+				},
+			},
+			async saveImages(options) {
+				assert.deepEqual(options, {
+					names: ['alpine:3.20', 'busybox:latest'],
+				});
+				return {
+					body: archiveBody,
+					headers: {
+						'content-type': 'application/x-tar',
+					},
+					statusCode: 200,
+				};
+			},
+		},
+		async () => {
+			const [items] = await dockerFilesNode.execute.call(context);
+
+			assert.equal(items.length, 1);
+			assert.equal(items[0].json.operation, 'save');
+			assert.equal(items[0].json.bytes, archiveBody.length);
+			assert.deepEqual(items[0].json.imageReferences, ['alpine:3.20', 'busybox:latest']);
+			assert.equal(items[0].binary.archive.fileName, 'images.tar');
+			assert.equal(
+				Buffer.from(items[0].binary.archive.data, 'base64').toString('utf8'),
+				'image-archive',
+			);
+		},
+	);
+});
+
+test('Docker Files image load consumes tar binary input and parses JSON-line output', async () => {
+	const dockerFilesNode = new DockerFiles();
+	const tarBuffer = Buffer.from('fake-tar-contents', 'utf8');
+	const context = createExecuteContext({
+		inputItems: [
+			{
+				binary: {
+					archive: {
+						data: tarBuffer.toString('base64'),
+						fileName: 'images.tar',
+					},
+				},
+				json: {},
+			},
+		],
+		node: createNodeMetadata('Docker Files', 'dockerFiles'),
+		parameters: {
+			binaryPropertyName: 'archive',
+			loadQuiet: true,
+			operation: 'load',
+			resource: 'image',
+		},
+	});
+
+	await withPatchedDockerClient(
+		{
+			accessMode: {
+				get() {
+					return 'fullControl';
+				},
+			},
+			async loadImages(options) {
+				assert.equal(options.body.toString('utf8'), 'fake-tar-contents');
+				assert.equal(options.quiet, true);
+				return {
+					body: Buffer.from(
+						[
+							JSON.stringify({ stream: 'Loaded image: alpine:3.20' }),
+							JSON.stringify({ stream: 'Loaded image: busybox:latest' }),
+							'',
+						].join('\n'),
+					),
+					headers: {
+						'content-type': 'application/json',
+					},
+					statusCode: 200,
+				};
+			},
+		},
+		async () => {
+			const [items] = await dockerFilesNode.execute.call(context);
+
+			assert.equal(items.length, 1);
+			assert.equal(items[0].json.operation, 'load');
+			assert.equal(items[0].json.binaryPropertyName, 'archive');
+			assert.equal(items[0].json.bytes, tarBuffer.length);
+			assert.equal(items[0].json.messageCount, 2);
+			assert.deepEqual(items[0].json.rawLines, [
+				'{"stream":"Loaded image: alpine:3.20"}',
+				'{"stream":"Loaded image: busybox:latest"}',
+			]);
+		},
+	);
+});

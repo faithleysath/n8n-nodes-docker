@@ -4,6 +4,7 @@ const { randomUUID } = require('node:crypto');
 const test = require('node:test');
 
 const { DockerApiClient } = require('../dist/nodes/Docker/transport/dockerClient.js');
+const { parseDockerJsonLines } = require('../dist/nodes/Docker/transport/dockerJsonLines.js');
 const {
 	createSingleFileTarArchive,
 	extractSingleFileFromTarBuffer,
@@ -16,6 +17,22 @@ function docker(...args) {
 		encoding: 'utf8',
 		stdio: ['ignore', 'pipe', 'pipe'],
 	}).trim();
+}
+
+function dockerAllowFailure(...args) {
+	try {
+		return docker(...args);
+	} catch {
+		return null;
+	}
+}
+
+function ensureImage(imageReference) {
+	if (dockerAllowFailure('image', 'inspect', imageReference) !== null) {
+		return;
+	}
+
+	docker('pull', imageReference);
 }
 
 function createClient() {
@@ -32,7 +49,7 @@ if (!shouldRun) {
 } else {
 	test('Docker integration covers create/start/exec/wait/remove and file round-trips', async () => {
 		docker('version');
-		docker('pull', 'alpine:3.20');
+		ensureImage('alpine:3.20');
 
 		const client = createClient();
 		const longRunningName = `n8n-docker-long-${randomUUID().slice(0, 8)}`;
@@ -108,6 +125,247 @@ if (!shouldRun) {
 					removeVolumes: true,
 				});
 			} catch {}
+			}
+		});
+
+	test('Docker integration covers Phase 3 image and system operations', async () => {
+		docker('version');
+		ensureImage('alpine:3.20');
+
+		const client = createClient();
+		const testId = randomUUID().slice(0, 8);
+		const tempTagRepository = `n8n-phase3-image-${testId}`;
+		const tempTaggedImage = `${tempTagRepository}:latest`;
+		const pruneLabel = `n8n.integration.image=${testId}`;
+		const pruneContainerName = `n8n-image-prune-src-${testId}`;
+		const pruneImage = `n8n-phase3-prune:${testId}`;
+		const eventContainerName = `n8n-events-${testId}`;
+
+		try {
+			const images = await client.listImages({ all: true });
+			assert.equal(images.some((image) => (image.RepoTags ?? []).includes('alpine:3.20')), true);
+
+			const pullResponse = await client.pullImage({ fromImage: 'alpine:3.20' });
+			const pullMessages = parseDockerJsonLines(pullResponse.body, pullResponse.headers['content-type']);
+			assert.equal(pullMessages.rawLines.length > 0, true);
+
+			const tagged = await client.tagImage('alpine:3.20', {
+				repo: tempTagRepository,
+				tag: 'latest',
+			});
+			assert.deepEqual(tagged, { changed: true, statusCode: 201 });
+
+			const inspected = await client.inspectImage(tempTaggedImage);
+			assert.equal(typeof inspected.Id, 'string');
+
+			const history = await client.getImageHistory(tempTaggedImage, {});
+			assert.equal(Array.isArray(history), true);
+			assert.equal(history.length > 0, true);
+
+			const saved = await client.saveImages({ names: ['alpine:3.20'] });
+			assert.equal(saved.body.length > 0, true);
+
+			const loaded = await client.loadImages({
+				body: saved.body,
+				quiet: true,
+			});
+			const loadMessages = parseDockerJsonLines(loaded.body, loaded.headers['content-type']);
+			assert.equal(
+				loadMessages.rawLines.some((line) => line.includes('Loaded image')),
+				true,
+			);
+
+			const removedTag = await client.removeImage(tempTaggedImage, {
+				force: false,
+				noPrune: true,
+			});
+			assert.equal(
+				removedTag.some((entry) => Object.values(entry).some((value) => String(value).includes(tempTagRepository))),
+				true,
+			);
+
+			docker('create', '--name', pruneContainerName, 'alpine:3.20', 'true');
+			docker('commit', '--change', `LABEL ${pruneLabel}`, pruneContainerName, pruneImage);
+			docker('rm', '-f', pruneContainerName);
+
+			const prunedImages = await client.pruneImages({
+				filters: JSON.stringify({
+					dangling: ['false'],
+					label: [pruneLabel],
+				}),
+			});
+			assert.equal(Array.isArray(prunedImages.ImagesDeleted), true);
+			assert.equal(dockerAllowFailure('image', 'inspect', pruneImage), null);
+
+			const df = await client.getSystemDataUsage();
+			assert.equal(Array.isArray(df.Images), true);
+			assert.equal(Array.isArray(df.Containers), true);
+			assert.equal(Array.isArray(df.Volumes), true);
+
+			await client.createContainer({
+				body: {
+					Cmd: ['sh', '-c', 'sleep 60'],
+					Image: 'alpine:3.20',
+				},
+				name: eventContainerName,
+				});
+				const eventSince = String(Math.floor(Date.now() / 1000) - 10);
+				await client.startContainer(eventContainerName);
+				await client.stopContainer(eventContainerName, { timeoutSeconds: 1 });
+				await new Promise((resolve) => setTimeout(resolve, 1_000));
+				const eventUntil = String(Math.floor(Date.now() / 1000));
+			const eventsResponse = await client.getEvents({
+				filters: JSON.stringify({
+					container: [eventContainerName],
+					event: ['start', 'stop'],
+					type: ['container'],
+				}),
+				since: eventSince,
+				until: eventUntil,
+			});
+			const events = parseDockerJsonLines(
+				eventsResponse.body,
+				eventsResponse.headers['content-type'],
+			);
+			const eventActions = events.entries.map((event) => event.Action);
+			assert.equal(eventActions.includes('start'), true);
+			assert.equal(eventActions.includes('stop'), true);
+		} finally {
+			dockerAllowFailure('rm', '-f', pruneContainerName);
+			dockerAllowFailure('rm', '-f', eventContainerName);
+			dockerAllowFailure('image', 'rm', '-f', pruneImage);
+			dockerAllowFailure('image', 'rm', '-f', tempTaggedImage);
 		}
 	});
-}
+
+	test('Docker integration covers Phase 3 network and volume operations', async () => {
+		docker('version');
+		ensureImage('alpine:3.20');
+
+		const client = createClient();
+		const testId = randomUUID().slice(0, 8);
+		const networkName = `n8n-net-${testId}`;
+		const networkPruneName = `n8n-net-prune-${testId}`;
+		const volumeName = `n8n-vol-${testId}`;
+		const volumePruneName = `n8n-vol-prune-${testId}`;
+		const containerName = `n8n-net-ctr-${testId}`;
+		const pruneLabel = `n8n.integration.phase3=${testId}`;
+
+		try {
+			const createdNetwork = await client.createNetwork({
+				Attachable: true,
+				Driver: 'bridge',
+				Labels: {
+					'n8n.integration.phase3': testId,
+				},
+				Name: networkName,
+			});
+			assert.equal(typeof createdNetwork.Id, 'string');
+
+			const inspectedNetwork = await client.inspectNetwork(networkName);
+			assert.equal(inspectedNetwork.Name, networkName);
+
+			const listedNetworks = await client.listNetworks();
+			assert.equal(listedNetworks.some((network) => network.Name === networkName), true);
+
+			await client.createContainer({
+				body: {
+					Cmd: ['sh', '-c', 'sleep 60'],
+					Image: 'alpine:3.20',
+				},
+				name: containerName,
+			});
+			await client.startContainer(containerName);
+
+			const connectResult = await client.connectNetwork(networkName, {
+				Container: containerName,
+				EndpointConfig: {
+					Aliases: ['worker'],
+				},
+			});
+			assert.deepEqual(connectResult, { changed: true, statusCode: 200 });
+
+			const connectedNetwork = await client.inspectNetwork(networkName);
+			assert.equal(
+				Object.values(connectedNetwork.Containers ?? {}).some(
+					(container) => container.Name === containerName,
+				),
+				true,
+			);
+
+			const disconnectResult = await client.disconnectNetwork(networkName, {
+				Container: containerName,
+				Force: true,
+			});
+			assert.deepEqual(disconnectResult, { changed: true, statusCode: 200 });
+
+			const disconnectedNetwork = await client.inspectNetwork(networkName);
+			assert.equal(
+				Object.values(disconnectedNetwork.Containers ?? {}).some(
+					(container) => container.Name === containerName,
+				),
+				false,
+			);
+
+			const deleteNetworkResult = await client.deleteNetwork(networkName);
+			assert.deepEqual(deleteNetworkResult, { changed: true, statusCode: 204 });
+
+			await client.createNetwork({
+				Driver: 'bridge',
+				Labels: {
+					'n8n.integration.phase3': testId,
+				},
+				Name: networkPruneName,
+			});
+			const prunedNetworks = await client.pruneNetworks({
+				filters: JSON.stringify({
+					label: [pruneLabel],
+				}),
+			});
+			assert.equal(prunedNetworks.NetworksDeleted.includes(networkPruneName), true);
+
+			const createdVolume = await client.createVolume({
+				Driver: 'local',
+				Labels: {
+					'n8n.integration.phase3': testId,
+				},
+				Name: volumeName,
+			});
+			assert.equal(createdVolume.Name, volumeName);
+
+			const inspectedVolume = await client.inspectVolume(volumeName);
+			assert.equal(inspectedVolume.Name, volumeName);
+
+			const listedVolumes = await client.listVolumes({});
+			assert.equal(
+				Array.isArray(listedVolumes.Volumes) &&
+					listedVolumes.Volumes.some((volume) => volume.Name === volumeName),
+				true,
+			);
+
+			const deletedVolume = await client.deleteVolume(volumeName, { force: true });
+			assert.deepEqual(deletedVolume, { changed: true, statusCode: 204 });
+
+			await client.createVolume({
+				Driver: 'local',
+				Labels: {
+					'n8n.integration.phase3': testId,
+				},
+				Name: volumePruneName,
+			});
+			const prunedVolumes = await client.pruneVolumes({
+				filters: JSON.stringify({
+					all: ['true'],
+					label: [pruneLabel],
+				}),
+			});
+			assert.equal(prunedVolumes.VolumesDeleted.includes(volumePruneName), true);
+		} finally {
+			dockerAllowFailure('rm', '-f', containerName);
+			dockerAllowFailure('network', 'rm', networkName);
+			dockerAllowFailure('network', 'rm', networkPruneName);
+			dockerAllowFailure('volume', 'rm', '-f', volumeName);
+			dockerAllowFailure('volume', 'rm', '-f', volumePruneName);
+		}
+	});
+	}

@@ -12,7 +12,7 @@ export class DockerApi implements ICredentialType {
 	properties: INodeProperties[] = [
 		{
 			displayName:
-				'Phase 2 supports Unix Socket, TCP, and TLS across both Docker and Docker Files nodes. SSH is still planned for a later phase because n8n credential tests do not support Docker-over-SSH transport out of the box.',
+				'Phase 3 supports Unix Socket, TCP, and TLS across Docker and Docker Files for containers, images, networks, volumes, and system actions. SSH is still planned for a later phase because n8n credential tests do not support Docker-over-SSH transport out of the box.',
 			name: 'phaseTwoNotice',
 			type: 'notice',
 			default: '',
@@ -166,12 +166,12 @@ export class DockerApi implements ICredentialType {
 				{
 					name: 'Read Only',
 					value: 'readOnly',
-					description: 'For list, inspect, logs, top, stats, wait, and daemon metadata workflows',
+					description: 'For container/image/network/volume read workflows, plus logs, top, stats, wait, history, df, events, and daemon metadata',
 				},
 				{
 					name: 'Full Control',
 					value: 'fullControl',
-					description: 'For create, update, exec, Docker Files copy/export, lifecycle, and prune workflows',
+					description: 'For create, update, exec, image pull/tag/remove, network and volume changes, Docker Files save/load/copy/export, and prune workflows',
 				},
 			],
 			description: 'Planning guardrail used by this package to gate dangerous operations',

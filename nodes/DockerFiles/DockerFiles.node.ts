@@ -21,6 +21,7 @@ import {
 	DockerRequestError,
 	type DockerCredentials,
 } from '../Docker/transport/dockerClient';
+import { parseDockerJsonLines } from '../Docker/transport/dockerJsonLines';
 import {
 	createContinueOnFailItem,
 	createNodeApiError,
@@ -36,7 +37,26 @@ import {
 	extractSingleFileFromTarBuffer,
 } from '../Docker/utils/tar';
 
-type DockerFilesOperation = 'copyFrom' | 'copyTo' | 'export';
+type DockerFilesResource = 'container' | 'image';
+type DockerFilesOperation = 'copyFrom' | 'copyTo' | 'export' | 'load' | 'save';
+
+function getFixedCollectionValues(
+	context: IExecuteFunctions,
+	name: string,
+	itemIndex: number,
+): Array<{ value?: string }> {
+	const parameterValue = context.getNodeParameter(name, itemIndex, { values: [] }) as {
+		values?: Array<{ value?: string }>;
+	};
+
+	return Array.isArray(parameterValue.values) ? parameterValue.values : [];
+}
+
+function getStringList(context: IExecuteFunctions, name: string, itemIndex: number): string[] {
+	return getFixedCollectionValues(context, name, itemIndex)
+		.map((entry) => String(entry.value ?? '').trim())
+		.filter((value) => value !== '');
+}
 
 function getPreferredFileName(pathValue: string, fallback: string): string {
 	const candidate = posix.basename(pathValue);
@@ -52,7 +72,8 @@ export class DockerFiles implements INodeType {
 		group: ['output'],
 		version: 1,
 		subtitle: '={{$parameter["operation"] + ": " + $parameter["resource"]}}',
-		description: 'Copy files to and from Docker containers, and export container filesystems',
+		description:
+			'Copy files to and from Docker containers, export container filesystems, and save or load Docker image tar archives',
 		defaults: {
 			name: 'Docker Files',
 		},
@@ -68,7 +89,7 @@ export class DockerFiles implements INodeType {
 		properties: [
 			{
 				displayName:
-					'Docker Files handles binary and tar workflows. It is intentionally separate from the AI-usable Docker node so binary data and file-system exports stay isolated.',
+					'Docker Files handles binary and tar workflows for both container file archives and image save/load. It is intentionally separate from the AI-usable Docker node so binary data and tar streams stay isolated.',
 				name: 'dockerFilesNotice',
 				type: 'notice',
 				default: '',
@@ -79,7 +100,10 @@ export class DockerFiles implements INodeType {
 				type: 'options',
 				noDataExpression: true,
 				default: 'container',
-				options: [{ name: 'Container', value: 'container' }],
+				options: [
+					{ name: 'Container', value: 'container' },
+					{ name: 'Image', value: 'image' },
+				],
 			},
 			{
 				displayName: 'Operation',
@@ -87,10 +111,31 @@ export class DockerFiles implements INodeType {
 				type: 'options',
 				noDataExpression: true,
 				default: 'copyFrom',
+				displayOptions: {
+					show: {
+						resource: ['container'],
+					},
+				},
 				options: [
 					{ name: 'Copy From', value: 'copyFrom', action: 'Copy files from a container' },
 					{ name: 'Copy To', value: 'copyTo', action: 'Copy files to a container' },
 					{ name: 'Export', value: 'export', action: 'Export a container filesystem' },
+				],
+			},
+			{
+				displayName: 'Operation',
+				name: 'operation',
+				type: 'options',
+				noDataExpression: true,
+				default: 'save',
+				displayOptions: {
+					show: {
+						resource: ['image'],
+					},
+				},
+				options: [
+					{ name: 'Load', value: 'load', action: 'Load docker images from a tar archive' },
+					{ name: 'Save', value: 'save', action: 'Save docker images to a tar archive' },
 				],
 			},
 			{
@@ -101,6 +146,11 @@ export class DockerFiles implements INodeType {
 				required: true,
 				placeholder: 'n8n or cd17c922acd6',
 				description: 'Container name or full/short container ID',
+				displayOptions: {
+					show: {
+						resource: ['container'],
+					},
+				},
 			},
 			{
 				displayName: 'Binary Property',
@@ -110,7 +160,7 @@ export class DockerFiles implements INodeType {
 				required: true,
 				displayOptions: {
 					show: {
-						operation: ['copyTo'],
+						operation: ['copyTo', 'load'],
 					},
 				},
 			},
@@ -187,7 +237,7 @@ export class DockerFiles implements INodeType {
 				required: true,
 				displayOptions: {
 					show: {
-						operation: ['copyFrom', 'export'],
+						operation: ['copyFrom', 'export', 'save'],
 					},
 				},
 			},
@@ -201,6 +251,66 @@ export class DockerFiles implements INodeType {
 				displayOptions: {
 					show: {
 						operation: ['copyFrom'],
+					},
+				},
+			},
+			{
+				displayName: 'Image References',
+				name: 'imageReferences',
+				type: 'fixedCollection',
+				typeOptions: {
+					multipleValues: true,
+				},
+				placeholder: 'Add Image',
+				default: {
+					values: [],
+				},
+				displayOptions: {
+					show: {
+						operation: ['save'],
+						resource: ['image'],
+					},
+				},
+				options: [
+					{
+						displayName: 'Images',
+						name: 'values',
+						values: [
+							{
+								displayName: 'Image Reference',
+								name: 'value',
+								type: 'string',
+								default: '',
+								required: true,
+							},
+						],
+					},
+				],
+				description: 'One or more image names, tags, digests, or IDs to include in the exported tar archive',
+			},
+			{
+				displayName: 'File Name',
+				name: 'saveFileName',
+				type: 'string',
+				default: 'docker-images.tar',
+				description: 'Optional binary file name for the exported image tarball',
+				displayOptions: {
+					show: {
+						operation: ['save'],
+						resource: ['image'],
+					},
+				},
+			},
+			{
+				displayName: 'Quiet',
+				name: 'loadQuiet',
+				type: 'boolean',
+				default: false,
+				description: 'Whether to suppress progress details during image load',
+				displayOptions: {
+					show: {
+						operation: ['load'],
+						resource: ['image'],
 					},
 				},
 			},
@@ -243,6 +353,7 @@ export class DockerFiles implements INodeType {
 		const returnData: INodeExecutionData[] = [];
 
 		for (let itemIndex = 0; itemIndex < inputItems.length; itemIndex += 1) {
+			const resource = this.getNodeParameter('resource', itemIndex) as DockerFilesResource;
 			const operation = this.getNodeParameter('operation', itemIndex) as DockerFilesOperation;
 
 			try {
@@ -250,14 +361,13 @@ export class DockerFiles implements INodeType {
 				const client = new DockerApiClient(credentials);
 				const node = getNodeGetter(this);
 				assertWritableAccess(node, client.accessMode, operation, itemIndex);
-				const containerId = assertNonEmptyValue(
-					node,
-					this.getNodeParameter('containerId', itemIndex) as string,
-					'Container ID or Name',
-					itemIndex,
-				);
-
-				if (operation === 'copyTo') {
+				if (resource === 'container' && operation === 'copyTo') {
+					const containerId = assertNonEmptyValue(
+						node,
+						this.getNodeParameter('containerId', itemIndex) as string,
+						'Container ID or Name',
+						itemIndex,
+					);
 					const binaryPropertyName = assertNonEmptyValue(
 						node,
 						this.getNodeParameter('binaryPropertyName', itemIndex) as string,
@@ -318,7 +428,13 @@ export class DockerFiles implements INodeType {
 					continue;
 				}
 
-				if (operation === 'copyFrom') {
+				if (resource === 'container' && operation === 'copyFrom') {
+					const containerId = assertNonEmptyValue(
+						node,
+						this.getNodeParameter('containerId', itemIndex) as string,
+						'Container ID or Name',
+						itemIndex,
+					);
 					const sourcePath = assertNonEmptyValue(
 						node,
 						this.getNodeParameter('sourcePath', itemIndex) as string,
@@ -411,42 +527,155 @@ export class DockerFiles implements INodeType {
 					continue;
 				}
 
-				const outputBinaryPropertyName = assertNonEmptyValue(
-					node,
-					this.getNodeParameter('outputBinaryPropertyName', itemIndex) as string,
-					'Output Binary Property',
-					itemIndex,
-				);
-				const exportResponse = await client.exportContainer(
-					containerId,
-					this.getExecutionCancelSignal(),
-				);
-				const preparedBinary = await this.helpers.prepareBinaryData(
-					exportResponse.body,
-					`${containerId}.tar`,
-					'application/x-tar',
-				);
-
-				returnData.push(
-					toExecutionItem(
-						{
-							bytes: exportResponse.body.length,
-							containerId,
-							operation,
-							outputMode: 'tar',
-						},
+				if (resource === 'container' && operation === 'export') {
+					const containerId = assertNonEmptyValue(
+						node,
+						this.getNodeParameter('containerId', itemIndex) as string,
+						'Container ID or Name',
 						itemIndex,
+					);
+					const outputBinaryPropertyName = assertNonEmptyValue(
+						node,
+						this.getNodeParameter('outputBinaryPropertyName', itemIndex) as string,
+						'Output Binary Property',
+						itemIndex,
+					);
+					const exportResponse = await client.exportContainer(
+						containerId,
+						this.getExecutionCancelSignal(),
+					);
+					const preparedBinary = await this.helpers.prepareBinaryData(
+						exportResponse.body,
+						`${containerId}.tar`,
+						'application/x-tar',
+					);
+
+					returnData.push(
+						toExecutionItem(
+							{
+								bytes: exportResponse.body.length,
+								containerId,
+								operation,
+								outputMode: 'tar',
+							},
+							itemIndex,
+							{
+								[outputBinaryPropertyName]: preparedBinary,
+							},
+						),
+					);
+					continue;
+				}
+
+				if (resource === 'image' && operation === 'save') {
+					const imageReferences = getStringList(this, 'imageReferences', itemIndex);
+
+					if (imageReferences.length === 0) {
+						throw new NodeOperationError(this.getNode(), 'Image References must include at least one image.', {
+							itemIndex,
+						});
+					}
+
+					const outputBinaryPropertyName = assertNonEmptyValue(
+						node,
+						this.getNodeParameter('outputBinaryPropertyName', itemIndex) as string,
+						'Output Binary Property',
+						itemIndex,
+					);
+					const fileName =
+						trimToUndefined(this.getNodeParameter('saveFileName', itemIndex, '') as string) ??
+						'docker-images.tar';
+					const saveResponse = await client.saveImages(
 						{
-							[outputBinaryPropertyName]: preparedBinary,
+							names: imageReferences,
 						},
-					),
+						this.getExecutionCancelSignal(),
+					);
+					const preparedBinary = await this.helpers.prepareBinaryData(
+						saveResponse.body,
+						fileName,
+						'application/x-tar',
+					);
+
+					returnData.push(
+						toExecutionItem(
+							{
+								bytes: saveResponse.body.length,
+								imageReferences,
+								operation,
+								outputMode: 'tar',
+							},
+							itemIndex,
+							{
+								[outputBinaryPropertyName]: preparedBinary,
+							},
+						),
+					);
+					continue;
+				}
+
+				if (resource === 'image' && operation === 'load') {
+					const binaryPropertyName = assertNonEmptyValue(
+						node,
+						this.getNodeParameter('binaryPropertyName', itemIndex) as string,
+						'Binary Property',
+						itemIndex,
+					);
+					const inputBinary = inputItems[itemIndex].binary?.[binaryPropertyName];
+
+					if (inputBinary === undefined) {
+						throw new NodeOperationError(
+							this.getNode(),
+							`Binary property "${binaryPropertyName}" was not found on the input item.`,
+							{ itemIndex },
+						);
+					}
+
+					const resolvedBinary = this.helpers.assertBinaryData(itemIndex, inputBinary);
+					const binaryBuffer = await this.helpers.getBinaryDataBuffer(itemIndex, resolvedBinary);
+					const quiet = this.getNodeParameter('loadQuiet', itemIndex) as boolean;
+					const loadResponse = await client.loadImages(
+						{
+							body: binaryBuffer,
+							quiet,
+						},
+						this.getExecutionCancelSignal(),
+					);
+					const parsedMessages = parseDockerJsonLines(
+						loadResponse.body,
+						loadResponse.headers['content-type'],
+					);
+
+					returnData.push(
+						toExecutionItem(
+							{
+								binaryPropertyName,
+								bytes: binaryBuffer.length,
+								contentType: parsedMessages.contentType,
+								messageCount: parsedMessages.entries.length,
+								messages: parsedMessages.entries,
+								operation,
+								quiet,
+								rawLines: parsedMessages.rawLines,
+								unparsedLines: parsedMessages.unparsedLines,
+							},
+							itemIndex,
+						),
+					);
+					continue;
+				}
+
+				throw new NodeOperationError(
+					this.getNode(),
+					`Unsupported Docker Files combination: resource "${resource}" with operation "${operation}".`,
+					{ itemIndex },
 				);
 			} catch (error) {
 				if (this.continueOnFail()) {
 					returnData.push(
 						createContinueOnFailItem(error, itemIndex, {
 							operation,
-							resource: 'container',
+							resource,
 						}),
 					);
 					continue;

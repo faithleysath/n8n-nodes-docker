@@ -5,13 +5,13 @@
 当前已经完成：
 
 - 独立 npm 包骨架
-- `Docker` 主节点的 Phase 2 非二进制容器能力
-- `Docker Files` 节点的二进制 / tar 文件能力
+- `Docker` 主节点的 Phase 3 JSON / 文本资源能力
+- `Docker Files` 节点的二进制 / tar 文件能力，包括容器文件归档和 image save/load
 - `Docker API` 凭证的可运行连接模型
 - 针对 transport、exec policy、tar 工具和节点边界的自动化测试
 - 从第一期到完全体的分阶段交付文档
 
-这个仓库还**没有**完成完整 Docker 产品矩阵。当前版本已经落地了容器深度能力、daemon metadata，以及独立的文件导入导出节点，后续镜像、网络、卷、trigger、build、registry 等能力仍按路线图继续推进。
+这个仓库还**没有**完成完整 Docker 产品矩阵。当前版本已经落地了容器、镜像、网络、卷、daemon metadata，以及独立的文件导入导出和 image archive 节点能力；后续 trigger、build、registry、SSH 等能力仍按路线图继续推进。
 
 ## 目标
 
@@ -33,7 +33,7 @@
 - `Docker`
   负责容器、镜像、网络、卷、system 等资源的 CRUD 与运维操作
 - `Docker Files`
-  负责容器文件导入导出、tar/binary 转换，以及需要 binary 输出的文件系统动作
+  负责容器文件导入导出、image save/load、tar/binary 转换，以及需要 binary 输出的文件系统动作
 - `Docker Trigger`
   监听或轮询 Docker events，把 daemon 事件转成工作流触发源
 - `Docker Build`
@@ -49,7 +49,7 @@
 - `TCP`
 - `TLS`
 
-当前 Phase 2 已实现前三种；`SSH` 仍在规划中。
+当前版本已实现前三种；`SSH` 仍在规划中。
 
 ## 安全边界
 
@@ -64,7 +64,7 @@ Docker daemon 的写权限基本等价于宿主机高权限控制，所以这个
 
 ## 开发状态
 
-当前版本：`0.3.1`
+当前版本：`0.4.1`
 
 当前实现状态：
 
@@ -81,26 +81,49 @@ Docker daemon 的写权限基本等价于宿主机高权限控制，所以这个
 - 已实现 `container:top`
 - 已实现 `container:update`
 - 已实现 `container:wait`
+- 已实现 `image:list`
+- 已实现 `image:inspect`
+- 已实现 `image:pull`
+- 已实现 `image:tag`
+- 已实现 `image:remove`
+- 已实现 `image:history`
+- 已实现 `image:prune`
+- 已实现 `network:list`
+- 已实现 `network:inspect`
+- 已实现 `network:create`
+- 已实现 `network:connect`
+- 已实现 `network:disconnect`
+- 已实现 `network:delete`
+- 已实现 `network:prune`
+- 已实现 `volume:list`
+- 已实现 `volume:inspect`
+- 已实现 `volume:create`
+- 已实现 `volume:delete`
+- 已实现 `volume:prune`
+- 已实现 `system:df`
+- 已实现 `system:events`
 - 已实现 `system:ping`
 - 已实现 `system:info`
 - 已实现 `system:version`
 - 已实现 `Docker Files:copyTo`
 - 已实现 `Docker Files:copyFrom`
 - 已实现 `Docker Files:export`
+- 已实现 `Docker Files:image:save`
+- 已实现 `Docker Files:image:load`
 - 已支持 `Unix Socket`、`TCP`、`TLS`
 - 已实现 `readOnly` / `fullControl` 危险操作门禁
 - 已加入 transport、exec policy、tar 工具、节点元数据与可选集成测试
-- `image` / `network` / `volume` / `SSH` / `trigger` 仍未实现
+- `SSH` / `trigger` / `build` / `registry` 仍未实现
 
 ## 当前节点范围
 
 当前包暴露两个节点：
 
 - `Docker`
-  资源范围是 `Container` 和 `System`
+  资源范围是 `Container`、`Image`、`Network`、`Volume` 和 `System`
   这是 AI 可调用节点，专门保留给 JSON / 文本型输入输出
 - `Docker Files`
-  负责 `copyTo`、`copyFrom`、`export`
+  负责 `copyTo`、`copyFrom`、`export`、`image save`、`image load`
   这个节点不作为 AI 工具，用来隔离 binary 与 tar 工作流
 
 这版是典型的 **programmatic-style node**，不是 declarative-style。原因是 Docker 的 Unix socket 连接、API version 协商、exec / logs raw-stream 解复用、archive/tar 处理、以及写操作门禁都不适合只靠 declarative routing 来表达。
@@ -116,8 +139,8 @@ Docker daemon 的写权限基本等价于宿主机高权限控制，所以这个
 说明：
 
 - `API Version` 默认为 `auto`，会在首次请求时自动协商
-- `Access Mode = Read Only` 时，只允许 `list`、`inspect`、`logs`、`top`、`stats`、`wait`、`ping`、`info`、`version`
-- `Access Mode = Full Control` 才允许 `create`、`update`、`exec`、`start`、`stop`、`restart`、`remove`，以及 `Docker Files` 的 `copyTo` / `copyFrom` / `export`
+- `Access Mode = Read Only` 时，只允许 `container:list/inspect/logs/top/stats/wait`、`image:list/inspect/history`、`network:list/inspect`、`volume:list/inspect`、`system:df/events/ping/info/version`
+- `Access Mode = Full Control` 才允许 `create`、`update`、`exec`、`start`、`stop`、`restart`、`remove`、`pull`、`tag`、网络和卷变更，以及 `Docker Files` 的 `copyTo` / `copyFrom` / `export` / `image save` / `image load`
 - 由于 n8n 的静态 credential request 模型不适合 Docker Unix socket，这个版本改用 node-level credential test 来校验 `Unix Socket`、`TCP`、`TLS` 连接，而不是提供一个误导性的“假测试”
 
 ## 文档导航
@@ -174,12 +197,12 @@ n8n-nodes-docker/
 
 ## 发布前需要你确认的内容
 
-这个 scaffold 里有两个占位字段，后续准备发到 GitHub/npm 之前需要替换：
+发布前建议确认这些字段仍然准确：
 
 - `package.json > homepage`
 - `package.json > repository.url`
 
-当前我先用了 `https://github.com/your-org/n8n-nodes-docker` 作为明确占位值，避免误指向一个不存在但看起来像真的地址。
+如果后续迁移组织、仓库名或 npm scope，记得同步更新这些元数据。
 
 ## 公开发布提示
 

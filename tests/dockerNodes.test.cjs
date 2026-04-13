@@ -23,7 +23,34 @@ test('Docker remains AI-usable while Docker Files is not', () => {
 			property.displayOptions?.show?.resource?.includes?.('container'),
 	);
 	const dockerFilesOperationProperty = dockerFilesNode.description.properties.find(
-		(property) => property.name === 'operation',
+		(property) =>
+			property.name === 'operation' &&
+			property.displayOptions?.show?.resource?.includes?.('container'),
+	);
+	const dockerImageOperationProperty = dockerNode.description.properties.find(
+		(property) =>
+			property.name === 'operation' &&
+			property.displayOptions?.show?.resource?.includes?.('image'),
+	);
+	const dockerNetworkOperationProperty = dockerNode.description.properties.find(
+		(property) =>
+			property.name === 'operation' &&
+			property.displayOptions?.show?.resource?.includes?.('network'),
+	);
+	const dockerVolumeOperationProperty = dockerNode.description.properties.find(
+		(property) =>
+			property.name === 'operation' &&
+			property.displayOptions?.show?.resource?.includes?.('volume'),
+	);
+	const dockerSystemOperationProperty = dockerNode.description.properties.find(
+		(property) =>
+			property.name === 'operation' &&
+			property.displayOptions?.show?.resource?.includes?.('system'),
+	);
+	const dockerFilesImageOperationProperty = dockerFilesNode.description.properties.find(
+		(property) =>
+			property.name === 'operation' &&
+			property.displayOptions?.show?.resource?.includes?.('image'),
 	);
 
 	assert.deepEqual(
@@ -33,6 +60,26 @@ test('Docker remains AI-usable while Docker Files is not', () => {
 	assert.deepEqual(
 		dockerFilesOperationProperty.options.map((option) => option.value),
 		['copyFrom', 'copyTo', 'export'],
+	);
+	assert.deepEqual(
+		dockerImageOperationProperty.options.map((option) => option.value),
+		['history', 'inspect', 'list', 'prune', 'pull', 'remove', 'tag'],
+	);
+	assert.deepEqual(
+		dockerNetworkOperationProperty.options.map((option) => option.value),
+		['connect', 'create', 'delete', 'disconnect', 'inspect', 'list', 'prune'],
+	);
+	assert.deepEqual(
+		dockerVolumeOperationProperty.options.map((option) => option.value),
+		['create', 'delete', 'inspect', 'list', 'prune'],
+	);
+	assert.deepEqual(
+		dockerSystemOperationProperty.options.map((option) => option.value),
+		['df', 'events', 'info', 'ping', 'version'],
+	);
+	assert.deepEqual(
+		dockerFilesImageOperationProperty.options.map((option) => option.value),
+		['load', 'save'],
 	);
 });
 

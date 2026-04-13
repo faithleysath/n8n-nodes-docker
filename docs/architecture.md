@@ -52,6 +52,8 @@
 - `copyTo`
 - `copyFrom`
 - `export`
+- `save`
+- `load`
 - tar / binary 转换
 
 为什么单独拆：
@@ -65,8 +67,7 @@
 职责：
 
 - `build`
-- `load`
-- `save`
+- 更重的 image import/export
 - 大 tar 包与 BuildKit 流
 
 为什么不和主节点一起首发：
@@ -252,7 +253,7 @@ Docker 文件导入导出不能只按普通文本字段来做，必须和 n8n bi
 建议执行层保留这些 guardrail：
 
 - `readOnly` 凭证默认禁止写操作
-- `fullControl` 才允许 `create / delete / exec / copyTo / copyFrom / export / prune`
+- `fullControl` 才允许 `create / delete / exec / pull / tag / copyTo / copyFrom / export / save / load / prune`
 - `system prune`、`image remove`、`container remove --force` 等危险动作必须单独显式参数开启
 - `Docker` 主节点默认启用 AI tool 模式，但只暴露非 binary 的 JSON / 文本操作
 - `Docker Files` 节点不启用 AI tool 模式
@@ -294,8 +295,8 @@ Docker 文件导入导出不能只按普通文本字段来做，必须和 n8n bi
 
 - `0.1.x` scaffold 和设计落地
 - `0.2.x` container MVP
-- `0.3.x` image + system
-- `0.4.x` network + volume
+- `0.3.x` 完整 container deepening
+- `0.4.x` image + network + volume + system
 - `0.5.x` trigger + advanced exec/file
 - `0.6.x+` build / registry / advanced workflows
 

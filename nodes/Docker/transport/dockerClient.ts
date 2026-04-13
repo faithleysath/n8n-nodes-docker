@@ -9,6 +9,8 @@ export type DockerConnectionMode = 'unixSocket' | 'tcp' | 'tls' | 'ssh';
 export type DockerAccessMode = 'readOnly' | 'fullControl';
 export type DockerRequestMethod = 'DELETE' | 'GET' | 'HEAD' | 'POST' | 'PUT';
 export type DockerJson = Record<string, unknown>;
+export type DockerQueryPrimitive = boolean | number | string;
+export type DockerQueryValue = DockerQueryPrimitive | DockerQueryPrimitive[] | undefined;
 
 export interface DockerCredentials {
 	accessMode?: DockerAccessMode;
@@ -31,7 +33,7 @@ export interface DockerRequestOptions {
 	headers?: Record<string, string>;
 	method?: DockerRequestMethod;
 	path: string;
-	query?: Record<string, boolean | number | string | undefined>;
+	query?: Record<string, DockerQueryValue>;
 	versioned?: boolean;
 }
 
@@ -144,7 +146,7 @@ function firstHeaderValue(value: string | string[] | undefined): string | undefi
 }
 
 function buildQueryString(
-	query: Record<string, boolean | number | string | undefined> | undefined,
+	query: Record<string, DockerQueryValue> | undefined,
 ): string {
 	if (query === undefined) {
 		return '';
@@ -157,12 +159,16 @@ function buildQueryString(
 			continue;
 		}
 
-		if (typeof rawValue === 'boolean') {
-			searchParams.set(key, rawValue ? '1' : '0');
-			continue;
-		}
+		const values = Array.isArray(rawValue) ? rawValue : [rawValue];
 
-		searchParams.set(key, String(rawValue));
+		for (const value of values) {
+			if (typeof value === 'boolean') {
+				searchParams.append(key, value ? '1' : '0');
+				continue;
+			}
+
+			searchParams.append(key, String(value));
+		}
 	}
 
 	const serialized = searchParams.toString();
@@ -234,6 +240,32 @@ export class DockerApiClient {
 		return this.requestJson<DockerJson>({
 			abortSignal,
 			path: '/info',
+		});
+	}
+
+	async getSystemDataUsage(abortSignal?: AbortSignal): Promise<DockerJson> {
+		return this.requestJson<DockerJson>({
+			abortSignal,
+			path: '/system/df',
+		});
+	}
+
+	async getEvents(
+		options: {
+			filters?: string;
+			since?: string;
+			until?: string;
+		},
+		abortSignal?: AbortSignal,
+	): Promise<DockerRawResponse> {
+		return this.request({
+			abortSignal,
+			path: '/events',
+			query: {
+				filters: options.filters,
+				since: options.since,
+				until: options.until,
+			},
 		});
 	}
 
@@ -535,6 +567,295 @@ export class DockerApiClient {
 		});
 	}
 
+	async listImages(
+		options: {
+			all?: boolean;
+			digests?: boolean;
+			filters?: string;
+		},
+		abortSignal?: AbortSignal,
+	): Promise<DockerJson[]> {
+		return this.requestJson<DockerJson[]>({
+			abortSignal,
+			path: '/images/json',
+			query: {
+				all: options.all ?? false,
+				digests: options.digests ?? false,
+				filters: options.filters,
+			},
+		});
+	}
+
+	async inspectImage(imageReference: string, abortSignal?: AbortSignal): Promise<DockerJson> {
+		return this.requestJson<DockerJson>({
+			abortSignal,
+			path: `/images/${encodeURIComponent(imageReference)}/json`,
+		});
+	}
+
+	async getImageHistory(
+		imageReference: string,
+		options: { platform?: string },
+		abortSignal?: AbortSignal,
+	): Promise<DockerJson[]> {
+		return this.requestJson<DockerJson[]>({
+			abortSignal,
+			path: `/images/${encodeURIComponent(imageReference)}/history`,
+			query: {
+				platform: options.platform,
+			},
+		});
+	}
+
+	async pullImage(
+		options: { fromImage: string; platform?: string },
+		abortSignal?: AbortSignal,
+	): Promise<DockerRawResponse> {
+		return this.request({
+			abortSignal,
+			method: 'POST',
+			path: '/images/create',
+			query: {
+				fromImage: options.fromImage,
+				platform: options.platform,
+			},
+		});
+	}
+
+	async tagImage(
+		imageReference: string,
+		options: { repo: string; tag?: string },
+		abortSignal?: AbortSignal,
+	): Promise<DockerActionResult> {
+		return this.requestAction(
+			{
+				abortSignal,
+				expectedStatusCodes: [201],
+				method: 'POST',
+				path: `/images/${encodeURIComponent(imageReference)}/tag`,
+				query: {
+					repo: options.repo,
+					tag: options.tag,
+				},
+			},
+			[201],
+		);
+	}
+
+	async removeImage(
+		imageReference: string,
+		options: { force: boolean; noPrune: boolean },
+		abortSignal?: AbortSignal,
+	): Promise<DockerJson[]> {
+		return this.requestJson<DockerJson[]>({
+			abortSignal,
+			method: 'DELETE',
+			path: `/images/${encodeURIComponent(imageReference)}`,
+			query: {
+				force: options.force,
+				noprune: options.noPrune,
+			},
+		});
+	}
+
+	async pruneImages(options: { filters?: string }, abortSignal?: AbortSignal): Promise<DockerJson> {
+		return this.requestJson<DockerJson>({
+			abortSignal,
+			method: 'POST',
+			path: '/images/prune',
+			query: {
+				filters: options.filters,
+			},
+		});
+	}
+
+	async saveImages(
+		options: { names: string[]; platform?: string },
+		abortSignal?: AbortSignal,
+	): Promise<DockerRawResponse> {
+		return this.request({
+			abortSignal,
+			headers: {
+				Accept: 'application/x-tar',
+			},
+			path: '/images/get',
+			query: {
+				names: options.names,
+				platform: options.platform,
+			},
+		});
+	}
+
+	async loadImages(
+		options: { body: Buffer; platform?: string; quiet?: boolean },
+		abortSignal?: AbortSignal,
+	): Promise<DockerRawResponse> {
+		return this.request({
+			abortSignal,
+			body: options.body,
+			headers: {
+				'Content-Type': 'application/x-tar',
+			},
+			method: 'POST',
+			path: '/images/load',
+			query: {
+				platform: options.platform,
+				quiet: options.quiet ?? false,
+			},
+		});
+	}
+
+	async listNetworks(abortSignal?: AbortSignal): Promise<DockerJson[]> {
+		return this.requestJson<DockerJson[]>({
+			abortSignal,
+			path: '/networks',
+		});
+	}
+
+	async inspectNetwork(networkId: string, abortSignal?: AbortSignal): Promise<DockerJson> {
+		return this.requestJson<DockerJson>({
+			abortSignal,
+			path: `/networks/${encodeURIComponent(networkId)}`,
+		});
+	}
+
+	async createNetwork(body: DockerJson, abortSignal?: AbortSignal): Promise<DockerJson> {
+		return this.requestJson<DockerJson>({
+			abortSignal,
+			body: JSON.stringify(body),
+			headers: {
+				'Content-Type': 'application/json',
+			},
+			method: 'POST',
+			path: '/networks/create',
+		});
+	}
+
+	async connectNetwork(
+		networkId: string,
+		body: DockerJson,
+		abortSignal?: AbortSignal,
+	): Promise<DockerActionResult> {
+		return this.requestAction(
+			{
+				abortSignal,
+				body: JSON.stringify(body),
+				expectedStatusCodes: [200],
+				headers: {
+					'Content-Type': 'application/json',
+				},
+				method: 'POST',
+				path: `/networks/${encodeURIComponent(networkId)}/connect`,
+			},
+			[200],
+		);
+	}
+
+	async disconnectNetwork(
+		networkId: string,
+		body: DockerJson,
+		abortSignal?: AbortSignal,
+	): Promise<DockerActionResult> {
+		return this.requestAction(
+			{
+				abortSignal,
+				body: JSON.stringify(body),
+				expectedStatusCodes: [200],
+				headers: {
+					'Content-Type': 'application/json',
+				},
+				method: 'POST',
+				path: `/networks/${encodeURIComponent(networkId)}/disconnect`,
+			},
+			[200],
+		);
+	}
+
+	async deleteNetwork(networkId: string, abortSignal?: AbortSignal): Promise<DockerActionResult> {
+		return this.requestAction(
+			{
+				abortSignal,
+				expectedStatusCodes: [204],
+				method: 'DELETE',
+				path: `/networks/${encodeURIComponent(networkId)}`,
+			},
+			[204],
+		);
+	}
+
+	async pruneNetworks(
+		options: { filters?: string },
+		abortSignal?: AbortSignal,
+	): Promise<DockerJson> {
+		return this.requestJson<DockerJson>({
+			abortSignal,
+			method: 'POST',
+			path: '/networks/prune',
+			query: {
+				filters: options.filters,
+			},
+		});
+	}
+
+	async listVolumes(options: { filters?: string }, abortSignal?: AbortSignal): Promise<DockerJson> {
+		return this.requestJson<DockerJson>({
+			abortSignal,
+			path: '/volumes',
+			query: {
+				filters: options.filters,
+			},
+		});
+	}
+
+	async inspectVolume(volumeName: string, abortSignal?: AbortSignal): Promise<DockerJson> {
+		return this.requestJson<DockerJson>({
+			abortSignal,
+			path: `/volumes/${encodeURIComponent(volumeName)}`,
+		});
+	}
+
+	async createVolume(body: DockerJson, abortSignal?: AbortSignal): Promise<DockerJson> {
+		return this.requestJson<DockerJson>({
+			abortSignal,
+			body: JSON.stringify(body),
+			headers: {
+				'Content-Type': 'application/json',
+			},
+			method: 'POST',
+			path: '/volumes/create',
+		});
+	}
+
+	async deleteVolume(
+		volumeName: string,
+		options: { force: boolean },
+		abortSignal?: AbortSignal,
+	): Promise<DockerActionResult> {
+		return this.requestAction(
+			{
+				abortSignal,
+				expectedStatusCodes: [204],
+				method: 'DELETE',
+				path: `/volumes/${encodeURIComponent(volumeName)}`,
+				query: {
+					force: options.force,
+				},
+			},
+			[204],
+		);
+	}
+
+	async pruneVolumes(options: { filters?: string }, abortSignal?: AbortSignal): Promise<DockerJson> {
+		return this.requestJson<DockerJson>({
+			abortSignal,
+			method: 'POST',
+			path: '/volumes/prune',
+			query: {
+				filters: options.filters,
+			},
+		});
+	}
+
 	private async requestJson<T>(options: DockerRequestOptions): Promise<T> {
 		const response = await this.request(options);
 		const parsed = parseJsonIfPossible(response.body);
@@ -554,6 +875,18 @@ export class DockerApiClient {
 
 		return {
 			changed: response.statusCode === 204,
+			statusCode: response.statusCode,
+		};
+	}
+
+	private async requestAction(
+		options: DockerRequestOptions,
+		changedStatusCodes: number[],
+	): Promise<DockerActionResult> {
+		const response = await this.request(options);
+
+		return {
+			changed: changedStatusCodes.includes(response.statusCode),
 			statusCode: response.statusCode,
 		};
 	}
@@ -640,7 +973,7 @@ export class DockerApiClient {
 
 	private async buildRequestPath(
 		pathname: string,
-		query: Record<string, boolean | number | string | undefined> | undefined,
+		query: Record<string, DockerQueryValue> | undefined,
 		versioned: boolean,
 	): Promise<string> {
 		const normalizedPath = pathname.startsWith('/') ? pathname : `/${pathname}`;

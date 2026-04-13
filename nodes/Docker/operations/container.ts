@@ -113,6 +113,7 @@ function buildCreatePayload(context: IExecuteFunctions, itemIndex: number): {
 		context.getNodeParameter('createNetworkMode', itemIndex, '') as string,
 	);
 	const bindMounts = getFixedCollectionValues(context, 'createBindMounts', itemIndex);
+	const volumeMounts = getFixedCollectionValues(context, 'createVolumeMounts', itemIndex);
 	const portBindings = getFixedCollectionValues(context, 'createPortBindings', itemIndex);
 	const advancedJson = normalizeJsonParameter(
 		context.getNodeParameter('createAdvancedJson', itemIndex, '{}'),
@@ -185,6 +186,30 @@ function buildCreatePayload(context: IExecuteFunctions, itemIndex: number): {
 			const readOnly = Boolean(entry.readOnly);
 
 			return `${source}:${target}${readOnly ? ':ro' : ''}`;
+		});
+	}
+
+	if (volumeMounts.length > 0) {
+		hostConfig.Mounts = volumeMounts.map((entry) => {
+			const source = assertNonEmptyValue(
+				node,
+				String(entry.source ?? ''),
+				'Volume Name',
+				itemIndex,
+			);
+			const target = assertNonEmptyValue(
+				node,
+				String(entry.target ?? ''),
+				'Target Path',
+				itemIndex,
+			);
+
+			return {
+				ReadOnly: Boolean(entry.readOnly),
+				Source: source,
+				Target: target,
+				Type: 'volume',
+			};
 		});
 	}
 

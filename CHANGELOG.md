@@ -1,3 +1,12 @@
+## 0.4.1 - 2026-04-13
+
+- Completed the Phase 3 Docker resource surface on the main `Docker` node with `image`, `network`, `volume`, and expanded `system` operations
+- Added `image:list`, `inspect`, `pull`, `tag`, `remove`, `history`, and `prune`, plus bounded `system:df` and `system:events` reads
+- Added `network:list`, `inspect`, `create`, `connect`, `disconnect`, `delete`, and `prune`, plus `volume:list`, `inspect`, `create`, `delete`, and `prune`
+- Extended `Docker Files` with binary image archive workflows: `image:save` and `image:load`
+- Extended the custom Docker transport with repeated query parameter support, JSON-line parsing, and Phase 3 image/network/volume/system endpoints
+- Added named volume mounts to `container:create`, expanded automated tests for Phase 3 behavior, and updated README, architecture docs, roadmap, and operations matrix
+
 ## 0.3.1 - 2026-04-13
 
 - Expanded the `Docker` node to Phase 2 non-binary container operations: `create`, `update`, `wait`, `stats`, `top`, and `exec`

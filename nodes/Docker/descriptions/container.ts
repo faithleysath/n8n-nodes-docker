@@ -642,6 +642,47 @@ export const containerFields: INodeProperties[] = [
 		],
 	},
 	{
+		displayName: 'Named Volume Mounts',
+		name: 'createVolumeMounts',
+		type: 'fixedCollection',
+		typeOptions: {
+			multipleValues: true,
+		},
+		placeholder: 'Add Volume Mount',
+		default: {
+			values: [],
+		},
+		displayOptions: containerOperationDisplay(['create']),
+		options: [
+			{
+				displayName: 'Mounts',
+				name: 'values',
+				values: [
+					{
+						displayName: 'Volume Name',
+						name: 'source',
+						type: 'string',
+						default: '',
+						required: true,
+					},
+					{
+						displayName: 'Target Path',
+						name: 'target',
+						type: 'string',
+						default: '',
+						required: true,
+					},
+					{
+						displayName: 'Read Only',
+						name: 'readOnly',
+						type: 'boolean',
+						default: false,
+					},
+				],
+			},
+		],
+	},
+	{
 		displayName: 'Advanced JSON',
 		name: 'createAdvancedJson',
 		type: 'json',
