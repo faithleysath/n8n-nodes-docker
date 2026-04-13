@@ -6,6 +6,7 @@ import type { SystemOperation } from '../types';
 import {
 	createDockerEventFilterPayload,
 	getDockerReplaySince,
+	hasSeenDockerEvent,
 	normalizeDockerEvent,
 	readDockerEventCursorState,
 	recordDockerEvent,
@@ -194,7 +195,7 @@ export async function executeSystemOperation(
 				selectedEvents.push(...normalizedEvents);
 			} else {
 				for (const event of normalizedEvents) {
-					if (cursorState.recentEventKeys.includes(event.eventKey)) {
+					if (hasSeenDockerEvent(cursorState, event)) {
 						continue;
 					}
 

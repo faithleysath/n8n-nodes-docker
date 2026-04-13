@@ -1,6 +1,6 @@
 {
 	"name": "@faithleysath/n8n-nodes-docker",
-	"version": "0.6.0",
+	"version": "0.6.1",
 	"description": "Docker community nodes for n8n self-hosted instances",
 	"license": "MIT",
 	"homepage": "https://github.com/faithleysath/n8n-nodes-docker",

@@ -1,5 +1,6 @@
 const assert = require('node:assert/strict');
 const test = require('node:test');
+const { pack } = require('tar-stream');
 
 const { Docker } = require('../dist/nodes/Docker/Docker.node.js');
 const { DockerBuild } = require('../dist/nodes/DockerBuild/DockerBuild.node.js');
@@ -11,6 +12,46 @@ const {
 	decodeContainerArchiveStatHeader,
 	extractSingleFileFromTarBuffer,
 } = require('../dist/nodes/Docker/utils/tar.js');
+
+async function createTarArchive(entries) {
+	const archive = pack();
+	const chunks = [];
+
+	archive.on('data', (chunk) => {
+		chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+	});
+
+	const completed = new Promise((resolve, reject) => {
+		archive.on('end', () => resolve(Buffer.concat(chunks)));
+		archive.on('error', reject);
+	});
+
+	for (const entry of entries) {
+		await new Promise((resolve, reject) => {
+			archive.entry(
+				{
+					mode: entry.mode ?? 0o644,
+					name: entry.name,
+					size: entry.content?.length ?? 0,
+					type: entry.type ?? 'file',
+				},
+				entry.content ?? Buffer.alloc(0),
+				(error) => {
+					if (error != null) {
+						reject(error);
+						return;
+					}
+
+					resolve();
+				},
+			);
+		});
+	}
+
+	archive.finalize();
+
+	return await completed;
+}
 
 test('Docker remains AI-usable while Docker Files is not', () => {
 	const dockerNode = new Docker();
@@ -162,4 +203,25 @@ test('tar helpers round-trip a single file and decode archive headers', async ()
 		name: 'report.txt',
 		size: 11,
 	});
+});
+
+test('tar helpers reject multi-entry archives for single-file extraction', async () => {
+	const tarBuffer = await createTarArchive([
+		{ content: Buffer.from('a'), name: 'a.txt' },
+		{ content: Buffer.from('b'), name: 'b.txt' },
+	]);
+	const extracted = await extractSingleFileFromTarBuffer(tarBuffer);
+
+	assert.equal(extracted.entryCount, 2);
+	assert.equal(extracted.file, undefined);
+	assert.equal(extracted.reason, 'multipleEntries');
+});
+
+test('tar helpers reject non-file entries for single-file extraction', async () => {
+	const tarBuffer = await createTarArchive([{ name: 'nested', type: 'directory' }]);
+	const extracted = await extractSingleFileFromTarBuffer(tarBuffer);
+
+	assert.equal(extracted.entryCount, 1);
+	assert.equal(extracted.file, undefined);
+	assert.equal(extracted.reason, 'nonFileEntry');
 });

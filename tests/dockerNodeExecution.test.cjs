@@ -1,6 +1,9 @@
 const assert = require('node:assert/strict');
+const { once } = require('node:events');
+const http = require('node:http');
 const { PassThrough } = require('node:stream');
 const test = require('node:test');
+const { pack } = require('tar-stream');
 
 const { Docker } = require('../dist/nodes/Docker/Docker.node.js');
 const { DockerBuild } = require('../dist/nodes/DockerBuild/DockerBuild.node.js');
@@ -26,6 +29,51 @@ function createRawStreamFrame(streamType, payload) {
 	header.writeUInt32BE(payloadBuffer.length, 4);
 
 	return Buffer.concat([header, payloadBuffer]);
+}
+
+async function createTarArchive(entries) {
+	const archive = pack();
+	const chunks = [];
+
+	archive.on('data', (chunk) => {
+		chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+	});
+
+	const completed = new Promise((resolve, reject) => {
+		archive.on('end', () => resolve(Buffer.concat(chunks)));
+		archive.on('error', reject);
+	});
+
+	for (const entry of entries) {
+		await new Promise((resolve, reject) => {
+			archive.entry(
+				{
+					mode: entry.mode ?? 0o644,
+					name: entry.name,
+					size: entry.content?.length ?? 0,
+					type: entry.type ?? 'file',
+				},
+				entry.content ?? Buffer.alloc(0),
+				(error) => {
+					if (error != null) {
+						reject(error);
+						return;
+					}
+
+					resolve();
+				},
+			);
+		});
+	}
+
+	archive.finalize();
+
+	return await completed;
+}
+
+async function listen(server, host = '127.0.0.1') {
+	server.listen(0, host);
+	await once(server, 'listening');
 }
 
 async function waitForCondition(predicate, timeoutMs = 2_000) {
@@ -470,6 +518,82 @@ test('Docker Files copyFrom extracts a single file into binary output at the nod
 				Buffer.from(items[0].binary.download.data, 'base64').toString('utf8'),
 				'copied back',
 			);
+		},
+	);
+});
+
+test('Docker Files copyFrom falls back to tar output when extraction sees multiple entries', async () => {
+	const dockerFilesNode = new DockerFiles();
+	const archiveBody = await createTarArchive([
+		{ content: Buffer.from('alpha', 'utf8'), name: 'a.txt' },
+		{ content: Buffer.from('beta', 'utf8'), name: 'b.txt' },
+	]);
+	const archiveHeader = Buffer.from(
+		JSON.stringify({
+			linkTarget: '',
+			mode: 493,
+			mtime: '2026-04-13T00:00:00Z',
+			name: 'bundle',
+			size: archiveBody.length,
+		}),
+	).toString('base64');
+	const context = createExecuteContext({
+		node: createNodeMetadata('Docker Files', 'dockerFiles'),
+		parameters: {
+			containerId: 'demo',
+			extractSingleFile: true,
+			operation: 'copyFrom',
+			outputBinaryPropertyName: 'download',
+			resource: 'container',
+			sourcePath: '/tmp/bundle',
+		},
+	});
+
+	await withPatchedDockerClient(
+		{
+			accessMode: {
+				get() {
+					return 'fullControl';
+				},
+			},
+			async getContainerArchive(containerId, options) {
+				assert.equal(containerId, 'demo');
+				assert.deepEqual(options, { path: '/tmp/bundle' });
+
+				return {
+					body: archiveBody,
+					headers: {
+						'content-type': 'application/x-tar',
+					},
+					statusCode: 200,
+				};
+			},
+			async getContainerArchiveInfo(containerId, options) {
+				assert.equal(containerId, 'demo');
+				assert.deepEqual(options, { path: '/tmp/bundle' });
+
+				return {
+					body: Buffer.alloc(0),
+					headers: {
+						'x-docker-container-path-stat': archiveHeader,
+					},
+					statusCode: 200,
+				};
+			},
+		},
+		async () => {
+			const [items] = await dockerFilesNode.execute.call(context);
+
+			assert.equal(items.length, 1);
+			assert.equal(items[0].json.operation, 'copyFrom');
+			assert.equal(items[0].json.containerId, 'demo');
+			assert.equal(items[0].json.outputMode, 'tar');
+			assert.equal(items[0].json.extractedSingleFile, false);
+			assert.equal(items[0].json.entryCount, 2);
+			assert.equal(items[0].json.fallbackReason, 'multipleEntries');
+			assert.equal(items[0].binary.download.fileName, 'bundle.tar');
+			assert.equal(items[0].binary.download.mimeType, 'application/x-tar');
+			assert.deepEqual(Buffer.from(items[0].binary.download.data, 'base64'), archiveBody);
 		},
 	);
 });
@@ -973,6 +1097,87 @@ test('Docker Trigger replays from cursor after a disconnect without emitting dup
 	);
 });
 
+test('Docker Trigger recovers after an initial API negotiation failure on reconnect', async () => {
+	const dockerTrigger = new DockerTrigger();
+	const event = {
+		Action: 'start',
+		Actor: {
+			ID: 'container-9',
+		},
+		Type: 'container',
+		id: 'container-9',
+		time: 1712982400,
+		timeNano: 1712982400000000000,
+	};
+	let versionRequestCount = 0;
+	const server = http.createServer((request, response) => {
+		const url = new URL(request.url, 'http://127.0.0.1');
+
+		if (request.method === 'GET' && url.pathname === '/version') {
+			versionRequestCount += 1;
+
+			if (versionRequestCount === 1) {
+				response.statusCode = 500;
+				response.setHeader('content-type', 'application/json');
+				response.end(JSON.stringify({ message: 'daemon starting' }));
+				return;
+			}
+
+			response.setHeader('content-type', 'application/json');
+			response.end(JSON.stringify({ ApiVersion: '1.51' }));
+			return;
+		}
+
+		if (request.method === 'GET' && url.pathname === '/v1.51/events') {
+			response.setHeader('content-type', 'application/json');
+			response.write(`${JSON.stringify(event)}\n`);
+			return;
+		}
+
+		response.statusCode = 404;
+		response.end(JSON.stringify({ message: 'not found' }));
+	});
+
+	try {
+		await listen(server);
+
+		const address = server.address();
+		assert.notEqual(address, null);
+		assert.equal(typeof address, 'object');
+
+		const { context, emitted, workflowStaticData } = createTriggerContext({
+			credentials: {
+				accessMode: 'readOnly',
+				apiVersion: 'auto',
+				connectionMode: 'tcp',
+				host: '127.0.0.1',
+				port: address.port,
+			},
+			node: createNodeMetadata('Docker Trigger', 'dockerTrigger'),
+			parameters: {
+				actions: ['start'],
+				resourceTypes: ['container'],
+			},
+		});
+		const response = await dockerTrigger.trigger.call(context);
+
+		try {
+			await waitForCondition(() => emitted.length === 1, 4_000);
+
+			assert.equal(versionRequestCount, 2);
+			assert.equal(emitted[0][0][0].json.action, 'start');
+			assert.equal(emitted[0][0][0].json.actorId, 'container-9');
+			assert.equal(workflowStaticData.lastEventTime, event.time);
+			assert.equal(workflowStaticData.lastEventTimeNano, event.timeNano);
+		} finally {
+			await response.closeFunction();
+		}
+	} finally {
+		server.closeAllConnections();
+		server.close();
+	}
+});
+
 test('Docker Trigger closeFunction stops delayed replay before it emits or opens a stream', async () => {
 	const dockerTrigger = new DockerTrigger();
 	const replayEvent = {
@@ -1092,7 +1297,52 @@ test('Docker Trigger manual execution ignores stored cursor and waits for a fres
 	);
 });
 
-test('Docker system events resumeFromCursor does not re-emit more than 100 same-second events', async () => {
+test('Docker Trigger manual closeFunction rejects a pending manual trigger response', async () => {
+	const dockerTrigger = new DockerTrigger();
+	const stream = new PassThrough();
+	const { context } = createTriggerContext({
+		mode: 'manual',
+		node: createNodeMetadata('Docker Trigger', 'dockerTrigger'),
+		parameters: {
+			actions: ['start'],
+			resourceTypes: ['container'],
+		},
+	});
+	let closeCount = 0;
+
+	await withPatchedDockerClient(
+		{
+			async streamEvents() {
+				return {
+					close() {
+						closeCount += 1;
+						stream.destroy();
+					},
+					headers: {
+						'content-type': 'application/json',
+					},
+					statusCode: 200,
+					stream,
+				};
+			},
+		},
+		async () => {
+			const response = await dockerTrigger.trigger.call(context);
+			const pending = response.manualTriggerResponse;
+
+			assert.notEqual(pending, undefined);
+
+			await response.closeFunction();
+			await assert.rejects(
+				pending,
+				/Docker Trigger manual execution was closed before an event was received/,
+			);
+			assert.equal(closeCount, 1);
+		},
+	);
+});
+
+test('Docker system events resumeFromCursor keeps same-second dedupe state bounded by the latest cursor', async () => {
 	const dockerNode = new Docker();
 	const sameSecondEvents = Array.from({ length: 101 }, (_, index) => ({
 		Action: 'start',
@@ -1102,7 +1352,7 @@ test('Docker system events resumeFromCursor does not re-emit more than 100 same-
 		Type: 'container',
 		id: `container-${index}`,
 		time: 1712982300,
-		timeNano: 1712982300000000000 + index,
+		timeNano: 1712982300000000000 + index * 1024,
 	}));
 	const workflowStaticData = {};
 	let callCount = 0;
@@ -1142,7 +1392,11 @@ test('Docker system events resumeFromCursor does not re-emit more than 100 same-
 			assert.equal(callCount, 2);
 			assert.equal(firstItems.length, 101);
 			assert.equal(secondItems.length, 0);
-			assert.equal(workflowStaticData.recentEventKeys.length, 101);
+			assert.equal(workflowStaticData.recentEventKeys.length, 1);
+			assert.equal(
+				workflowStaticData.recentEventKeys[0],
+				getDockerEventKey(sameSecondEvents[sameSecondEvents.length - 1]),
+			);
 		},
 	);
 });

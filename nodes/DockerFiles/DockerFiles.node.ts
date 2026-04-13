@@ -467,7 +467,10 @@ export class DockerFiles implements INodeType {
 					const extractionResult = shouldExtractSingleFile
 						? await extractSingleFileFromTarBuffer(archiveResponse.body)
 						: undefined;
-					const extractedFile = extractionResult?.file;
+					const extractedFile =
+						extractionResult !== undefined && extractionResult.reason === undefined
+							? extractionResult.file
+							: undefined;
 					const extractionEntryCount = extractionResult?.entryCount ?? null;
 
 					if (extractedFile !== undefined) {

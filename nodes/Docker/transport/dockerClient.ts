@@ -138,12 +138,12 @@ function trimToUndefined(value: string | undefined): string | undefined {
 	return trimmed === '' ? undefined : trimmed;
 }
 
-function normalizePort(value: number | undefined, fallback: number): number {
-	if (typeof value === 'number' && Number.isInteger(value) && value > 0) {
-		return value;
-	}
+function getDefaultPort(isTls: boolean): number {
+	return isTls ? 2376 : 2375;
+}
 
-	return fallback;
+function resolveConnectionPort(value: number | undefined, fallback: number): number {
+	return value === undefined ? fallback : value;
 }
 
 function parseJsonIfPossible(buffer: Buffer): unknown {
@@ -1290,7 +1290,7 @@ export class DockerApiClient {
 
 		const hostname = trimToUndefined(this.credentials.host);
 		const isTls = this.credentials.connectionMode === 'tls';
-		const port = normalizePort(this.credentials.port, isTls ? 2376 : 2375);
+		const port = resolveConnectionPort(this.credentials.port, getDefaultPort(isTls));
 
 		return {
 			ca: trimToUndefined(this.credentials.ca),
@@ -1316,14 +1316,19 @@ export class DockerApiClient {
 
 		if (this.negotiatedApiVersion === undefined) {
 			this.negotiatedApiVersion = (async () => {
-				const version = await this.getVersion();
-				const negotiatedVersion = normalizeDockerApiVersion(version.ApiVersion);
+				try {
+					const version = await this.getVersion();
+					const negotiatedVersion = normalizeDockerApiVersion(version.ApiVersion);
 
-				if (negotiatedVersion === 'auto') {
-					throw new Error('Docker daemon did not report an API version for negotiation.');
+					if (negotiatedVersion === 'auto') {
+						throw new Error('Docker daemon did not report an API version for negotiation.');
+					}
+
+					return negotiatedVersion;
+				} catch (error) {
+					this.negotiatedApiVersion = undefined;
+					throw error;
 				}
-
-				return negotiatedVersion;
 			})();
 		}
 
@@ -1336,54 +1341,57 @@ export class DockerApiClient {
 		}
 
 		this.validatedConnection = (async () => {
-			switch (this.credentials.connectionMode) {
-				case 'unixSocket': {
-					const socketPath = trimToUndefined(this.credentials.socketPath);
+			try {
+				switch (this.credentials.connectionMode) {
+					case 'unixSocket': {
+						const socketPath = trimToUndefined(this.credentials.socketPath);
 
-					if (socketPath === undefined) {
-						throw new Error('Socket Path is required for Unix Socket mode.');
+						if (socketPath === undefined) {
+							throw new Error('Socket Path is required for Unix Socket mode.');
+						}
+
+						await access(socketPath);
+						return;
 					}
 
-					await access(socketPath);
-					return;
-				}
+					case 'tcp':
+					case 'tls': {
+						const host = trimToUndefined(this.credentials.host);
 
-				case 'tcp':
-				case 'tls': {
-					const host = trimToUndefined(this.credentials.host);
+						if (host === undefined) {
+							throw new Error('Host is required for TCP and TLS modes.');
+						}
 
-					if (host === undefined) {
-						throw new Error('Host is required for TCP and TLS modes.');
+						if (
+							this.credentials.port !== undefined &&
+							(!Number.isInteger(this.credentials.port) || this.credentials.port <= 0)
+						) {
+							throw new Error('Port must be a positive integer.');
+						}
+
+						const cert = trimToUndefined(this.credentials.cert);
+						const key = trimToUndefined(this.credentials.key);
+
+						if ((cert === undefined) !== (key === undefined)) {
+							throw new Error(
+								'TLS client certificate and client private key must be provided together.',
+							);
+						}
+
+						return;
 					}
 
-					const port = normalizePort(
-						this.credentials.port,
-						this.credentials.connectionMode === 'tls' ? 2376 : 2375,
-					);
-
-					if (!Number.isInteger(port) || port <= 0) {
-						throw new Error('Port must be a positive integer.');
-					}
-
-					const cert = trimToUndefined(this.credentials.cert);
-					const key = trimToUndefined(this.credentials.key);
-
-					if ((cert === undefined) !== (key === undefined)) {
+					case 'ssh':
 						throw new Error(
-							'TLS client certificate and client private key must be provided together.',
+							'Connection mode SSH is planned for a later phase and is not supported in this release.',
 						);
-					}
 
-					return;
+					default:
+						throw new Error('Select a supported Docker connection mode.');
 				}
-
-				case 'ssh':
-					throw new Error(
-						'Connection mode SSH is planned for a later phase and is not supported in this release.',
-					);
-
-				default:
-					throw new Error('Select a supported Docker connection mode.');
+			} catch (error) {
+				this.validatedConnection = undefined;
+				throw error;
 			}
 		})();
 

@@ -19,7 +19,6 @@ export function isAbortLikeError(error: unknown): boolean {
 	return (
 		name === 'AbortError' ||
 		code === 'ABORT_ERR' ||
-		code === 'ECONNRESET' ||
 		message.includes('aborted') ||
 		message.includes('The operation was aborted')
 	);

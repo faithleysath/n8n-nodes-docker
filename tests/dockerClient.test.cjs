@@ -1,9 +1,10 @@
 const assert = require('node:assert/strict');
 const { once } = require('node:events');
-const { mkdtempSync, rmSync } = require('node:fs');
+const { mkdtempSync, rmSync, writeFileSync } = require('node:fs');
 const http = require('node:http');
 const { tmpdir } = require('node:os');
 const { join } = require('node:path');
+const { PassThrough } = require('node:stream');
 const test = require('node:test');
 
 const {
@@ -182,6 +183,52 @@ test('waitForAbortableDelay resolves immediately when the signal is aborted', as
 	assert.equal(Date.now() - startedAt < 100, true);
 });
 
+test('collectDockerStreamResponse rejects unexpected ECONNRESET errors', async () => {
+	const stream = new PassThrough();
+	const response = {
+		close() {
+			stream.destroy();
+		},
+		headers: {},
+		statusCode: 200,
+		stream,
+	};
+	const collected = collectDockerStreamResponse(response);
+	const resetError = new Error('socket hang up');
+
+	resetError.code = 'ECONNRESET';
+
+	stream.write('partial');
+	stream.destroy(resetError);
+
+	await assert.rejects(collected, (error) => {
+		assert.equal(error, resetError);
+		assert.equal(error.code, 'ECONNRESET');
+		return true;
+	});
+});
+
+test('collectDockerStreamResponse resolves buffered data when the local abort signal closes the stream', async () => {
+	const stream = new PassThrough();
+	const abortController = new AbortController();
+	const response = {
+		close() {
+			stream.end();
+		},
+		headers: {},
+		statusCode: 200,
+		stream,
+	};
+	const collected = collectDockerStreamResponse(response, abortController.signal);
+
+	stream.write('partial');
+	abortController.abort();
+
+	const buffer = await collected;
+
+	assert.equal(buffer.toString('utf8'), 'partial');
+});
+
 test('DockerApiClient negotiates API version over a Unix socket', async () => {
 	const requests = [];
 	const socketDir = mkdtempSync(join(tmpdir(), 'docker-client-socket-'));
@@ -258,6 +305,88 @@ test('DockerApiClient respects explicit API versions for TCP connections', async
 	} finally {
 		server.closeAllConnections();
 		server.close();
+	}
+});
+
+test('DockerApiClient validates explicit ports and only defaults omitted ports', async () => {
+	const tcpClient = new DockerApiClient({
+		apiVersion: '1.51',
+		connectionMode: 'tcp',
+		host: '127.0.0.1',
+	});
+	const tlsClient = new DockerApiClient({
+		apiVersion: '1.51',
+		connectionMode: 'tls',
+		host: '127.0.0.1',
+	});
+	const negativePortClient = new DockerApiClient({
+		apiVersion: '1.51',
+		connectionMode: 'tcp',
+		host: '127.0.0.1',
+		port: -1,
+	});
+	const fractionalPortClient = new DockerApiClient({
+		apiVersion: '1.51',
+		connectionMode: 'tls',
+		host: '127.0.0.1',
+		port: 123.4,
+	});
+
+	assert.equal(tcpClient.buildRequestOptions('GET', '/v1.51/info', { path: '/info' }).port, 2375);
+	assert.equal(tlsClient.buildRequestOptions('GET', '/v1.51/info', { path: '/info' }).port, 2376);
+	await assert.rejects(
+		negativePortClient.validateConnectionSettings(),
+		/Port must be a positive integer/,
+	);
+	await assert.rejects(
+		fractionalPortClient.validateConnectionSettings(),
+		/Port must be a positive integer/,
+	);
+});
+
+test('DockerApiClient retries API negotiation after an initial failure', async () => {
+	const client = new DockerApiClient({
+		apiVersion: 'auto',
+		connectionMode: 'tcp',
+		host: '127.0.0.1',
+	});
+	let callCount = 0;
+
+	client.getVersion = async () => {
+		callCount += 1;
+
+		if (callCount === 1) {
+			throw new Error('transient negotiation failure');
+		}
+
+		return { ApiVersion: '1.51' };
+	};
+
+	await assert.rejects(client.resolveApiVersion(), /transient negotiation failure/);
+	assert.equal(await client.resolveApiVersion(), '1.51');
+	assert.equal(callCount, 2);
+});
+
+test('DockerApiClient retries connection validation after an initial failure', async () => {
+	const socketDir = mkdtempSync(join(tmpdir(), 'docker-client-validate-'));
+	const socketPath = join(socketDir, 'docker.sock');
+	const client = new DockerApiClient({
+		apiVersion: '1.51',
+		connectionMode: 'unixSocket',
+		socketPath,
+	});
+
+	try {
+		await assert.rejects(
+			client.validateConnectionSettings(),
+			(error) => error?.code === 'ENOENT',
+		);
+
+		writeFileSync(socketPath, 'placeholder');
+
+		await client.validateConnectionSettings();
+	} finally {
+		rmSync(socketDir, { force: true, recursive: true });
 	}
 });
 

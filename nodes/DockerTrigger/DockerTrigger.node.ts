@@ -199,6 +199,8 @@ export class DockerTrigger implements INodeType {
 		let manualResolve: ((data: INodeExecutionData[][]) => void) | undefined;
 		let manualReject: ((error: Error) => void) | undefined;
 		let manualTimeout: NodeJS.Timeout | undefined;
+		const createManualCloseError = () =>
+			new Error('Docker Trigger manual execution was closed before an event was received.');
 
 		const closeFunction = async () => {
 			closed = true;
@@ -217,6 +219,14 @@ export class DockerTrigger implements INodeType {
 			activeAbortController = undefined;
 			activeStream?.close();
 			activeStream = undefined;
+
+			if (manualReject !== undefined && !manualTimedOut) {
+				const reject = manualReject;
+
+				manualResolve = undefined;
+				manualReject = undefined;
+				reject(createManualCloseError());
+			}
 		};
 
 		const resolveManualResponse = (event: NormalizedDockerEvent) => {

@@ -87,6 +87,7 @@ export async function extractSingleFileFromTarBuffer(
 	let entryCount = 0;
 	let file: ExtractedTarEntry | undefined;
 	let reason: ExtractSingleFileResult['reason'];
+	let sawRegularFile = false;
 
 	const finished = new Promise<ExtractSingleFileResult>((resolve, reject) => {
 		archive.on('entry', (header, stream, next) => {
@@ -101,16 +102,19 @@ export async function extractSingleFileFromTarBuffer(
 			stream.on('end', () => {
 				if (entryCount > 1) {
 					reason = 'multipleEntries';
+					file = undefined;
 					next();
 					return;
 				}
 
 				if (header.type !== 'file') {
 					reason = 'nonFileEntry';
+					file = undefined;
 					next();
 					return;
 				}
 
+				sawRegularFile = true;
 				file = {
 					content: Buffer.concat(chunks),
 					fileName: header.name,
@@ -132,8 +136,11 @@ export async function extractSingleFileFromTarBuffer(
 
 			resolve({
 				entryCount,
-				file,
-				reason: file === undefined ? reason ?? 'nonFileEntry' : undefined,
+				file: entryCount === 1 && sawRegularFile && reason === undefined ? file : undefined,
+				reason:
+					entryCount === 1 && sawRegularFile && reason === undefined
+						? undefined
+						: reason ?? 'nonFileEntry',
 			});
 		});
 		archive.on('error', reject);

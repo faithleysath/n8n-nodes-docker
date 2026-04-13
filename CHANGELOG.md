@@ -1,3 +1,11 @@
+## 0.6.1 - 2026-04-14
+
+- Fixed TCP/TLS connection handling so only omitted ports fall back to Docker defaults, and transient validation or API negotiation failures can retry cleanly
+- Fixed Docker event cursor deduplication to compare `timeNano`/`time` before recent keys, preventing duplicate replays while keeping cursor state bounded after high-volume same-second events
+- Fixed `Docker Files` `copyFrom` single-file extraction to fall back to tar output when the archive contains multiple entries or non-file entries
+- Fixed `Docker Trigger` manual shutdown and stream abort handling so pending manual executions reject cleanly and unexpected `ECONNRESET` stream failures surface instead of being swallowed
+- Added regression coverage for connection retries, stream abort behavior, trigger shutdown, tar extraction fallbacks, and event replay deduplication
+
 ## 0.6.0 - 2026-04-13
 
 - Added a dedicated `Docker Build` node for tar-based `build` and `import` workflows with aggregate or split streamed output modes

@@ -31,22 +31,6 @@ export interface NormalizedDockerEvent extends DockerEvent {
 	type?: string;
 }
 
-function getDockerEventSecond(event: DockerEvent): number | undefined {
-	const time = normalizePositiveInteger(event.time);
-
-	if (time !== undefined) {
-		return time;
-	}
-
-	const timeNano = normalizePositiveInteger(event.timeNano);
-
-	if (timeNano !== undefined) {
-		return Math.floor(timeNano / 1_000_000_000);
-	}
-
-	return undefined;
-}
-
 function normalizeString(value: unknown): string | undefined {
 	if (typeof value !== 'string') {
 		return undefined;
@@ -154,10 +138,42 @@ export function readDockerEventCursorState(staticData: IDataObject): DockerEvent
 	};
 }
 
+function getEventCursorValue(event: DockerEvent | NormalizedDockerEvent): number | undefined {
+	return normalizePositiveInteger(event.timeNano) ?? normalizePositiveInteger(event.time);
+}
+
 export function hasSeenDockerEvent(
 	state: DockerEventCursorState,
 	event: DockerEvent | NormalizedDockerEvent,
 ): boolean {
+	const eventTimeNano = normalizePositiveInteger(event.timeNano);
+
+	if (eventTimeNano !== undefined && state.lastEventTimeNano !== undefined) {
+		if (eventTimeNano < state.lastEventTimeNano) {
+			return true;
+		}
+
+		if (eventTimeNano > state.lastEventTimeNano) {
+			return false;
+		}
+	}
+
+	const eventTime = normalizePositiveInteger(event.time);
+
+	if (
+		eventTimeNano === undefined &&
+		eventTime !== undefined &&
+		state.lastEventTime !== undefined
+	) {
+		if (eventTime < state.lastEventTime) {
+			return true;
+		}
+
+		if (eventTime > state.lastEventTime) {
+			return false;
+		}
+	}
+
 	const eventKey = 'eventKey' in event ? String(event.eventKey) : getDockerEventKey(event);
 
 	return state.recentEventKeys.includes(eventKey);
@@ -170,15 +186,15 @@ export function recordDockerEvent(
 ): DockerEventCursorState {
 	const normalized = 'eventKey' in event ? event : normalizeDockerEvent(event);
 	const normalizedEventKey = String(normalized.eventKey);
-	const previousEventSecond = getDockerEventSecond({
+	const previousEventCursor = getEventCursorValue({
 		time: state.lastEventTime,
 		timeNano: state.lastEventTimeNano,
 	});
-	const nextEventSecond = getDockerEventSecond(normalized);
+	const nextEventCursor = getEventCursorValue(normalized);
 	const recentEventKeys =
-		nextEventSecond !== undefined &&
-		previousEventSecond !== undefined &&
-		nextEventSecond !== previousEventSecond
+		nextEventCursor !== undefined &&
+		previousEventCursor !== undefined &&
+		nextEventCursor !== previousEventCursor
 			? [normalizedEventKey]
 			: [...state.recentEventKeys.filter((key) => key !== normalizedEventKey), normalizedEventKey];
 	const lastEventTimeNano =
