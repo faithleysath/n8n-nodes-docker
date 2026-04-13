@@ -161,9 +161,9 @@ n8n-nodes-docker/
 
 ## 公开发布提示
 
-如果你准备把这个包公开发布到 npm，请先注意两点：
+如果你准备把这个包公开发布到 npm，请先注意：
 
-- `n8n-nodes-docker` 这个包名已经被别人占用，建议改成 `@你的-npm-用户名/n8n-nodes-docker`
-- 当前仓库还没有配置真实的 GitHub 远端，`package.json` 的仓库地址也仍是占位值
+- 当前公开包名使用 `@faithleysath/n8n-nodes-docker`
+- 发布前仍需要先在这台机器上完成 `npm login`
 
 第一次发布前，按 [npm 发布指南](./docs/publishing.md) 走一遍会最稳。

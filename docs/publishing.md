@@ -5,11 +5,9 @@ owner-specific values to set before the first public npm release.
 
 ## 1. Pick a package name
 
-`n8n-nodes-docker` is already taken on npm, so you need a new name.
+`n8n-nodes-docker` is already taken on npm, so this repository uses:
 
-Recommended:
-
-- `@<your-npm-username>/n8n-nodes-docker`
+- `@faithleysath/n8n-nodes-docker`
 
 Alternative:
 
@@ -22,15 +20,12 @@ For n8n community nodes, the name must still match one of these formats:
 
 ## 2. Create the public GitHub repository
 
-This repo currently has no `origin` remote configured and `package.json` still
-uses placeholder links. Before publishing:
+This repo already points to:
 
-1. Create a GitHub repository for this package.
-2. Add it as the `origin` remote.
-3. Update these fields in `package.json`:
-   - `name`
-   - `homepage`
-   - `repository.url`
+- `https://github.com/faithleysath/n8n-nodes-docker`
+
+Before publishing, make sure the GitHub repository is pushed and publicly
+accessible.
 
 ## 3. Create or log in to your npm account
 
@@ -43,8 +38,8 @@ npm login
 npm whoami
 ```
 
-If you plan to use a scoped package, make sure the scope matches your npm user
-or org name.
+This package uses the `@faithleysath` scope, so the npm account must own that
+scope.
 
 ## 4. Configure GitHub Actions publishing
 
