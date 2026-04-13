@@ -66,6 +66,7 @@ Fallback setup: npm token
 ```bash
 pnpm lint
 pnpm test
+RUN_DOCKER_INTEGRATION=1 node --test tests/docker.integration.test.cjs
 pnpm build
 npm pack --dry-run
 ```
@@ -79,7 +80,7 @@ For a first release, use the simplest path:
 1. Update `package.json` fields and version.
 2. Update `CHANGELOG.md`.
 3. Commit and push your branch to GitHub.
-4. Create and push a semver tag such as `0.2.1`.
+4. Create and push a `v`-prefixed semver tag such as `v0.2.1`.
 5. Let GitHub Actions publish the package to npm.
 
 Example:
@@ -88,8 +89,8 @@ Example:
 git add .
 git commit -m "Prepare first npm release"
 git push origin main
-git tag 0.2.1
-git push origin 0.2.1
+git tag v0.2.1
+git push origin v0.2.1
 ```
 
 ## 7. Optional release helper

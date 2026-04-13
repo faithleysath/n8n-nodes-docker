@@ -8,6 +8,8 @@ const test = require('node:test');
 
 const {
 	DockerApiClient,
+	encodeDockerRegistryAuth,
+	encodeDockerRegistryConfig,
 	normalizeDockerApiVersion,
 } = require('../dist/nodes/Docker/transport/dockerClient.js');
 const {
@@ -48,6 +50,34 @@ test('normalizeDockerApiVersion accepts auto and strips v prefix', () => {
 	assert.equal(normalizeDockerApiVersion('v1.51'), '1.51');
 	assert.equal(normalizeDockerApiVersion('1.24'), '1.24');
 	assert.throws(() => normalizeDockerApiVersion('latest'), /Invalid Docker API version/);
+});
+
+test('registry auth helpers encode auth payloads as base64url JSON strings', () => {
+	const encodedAuth = encodeDockerRegistryAuth({
+		password: 'secret',
+		serveraddress: 'registry.example.com',
+		username: 'janedoe',
+	});
+	const encodedConfig = encodeDockerRegistryConfig({
+		'registry.example.com': {
+			password: 'secret',
+			serveraddress: 'registry.example.com',
+			username: 'janedoe',
+		},
+	});
+
+	assert.deepEqual(JSON.parse(Buffer.from(encodedAuth, 'base64url').toString('utf8')), {
+		password: 'secret',
+		serveraddress: 'registry.example.com',
+		username: 'janedoe',
+	});
+	assert.deepEqual(JSON.parse(Buffer.from(encodedConfig, 'base64url').toString('utf8')), {
+		'registry.example.com': {
+			password: 'secret',
+			serveraddress: 'registry.example.com',
+			username: 'janedoe',
+		},
+	});
 });
 
 test('parseDockerLogStream decodes Docker raw-stream frames', () => {
@@ -225,6 +255,205 @@ test('DockerApiClient respects explicit API versions for TCP connections', async
 		const info = await client.getInfo();
 
 		assert.deepEqual(info, { ServerVersion: 'test-daemon' });
+	} finally {
+		server.closeAllConnections();
+		server.close();
+	}
+});
+
+test('DockerApiClient streams build and import endpoints with expected query strings and headers', async () => {
+	const requests = [];
+	const server = http.createServer((request, response) => {
+		const url = new URL(request.url, 'http://127.0.0.1');
+		const chunks = [];
+
+		request.on('data', (chunk) => {
+			chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+		});
+
+		request.on('end', () => {
+			requests.push({
+				body: Buffer.concat(chunks),
+				headers: request.headers,
+				method: request.method,
+				url,
+			});
+
+			if (request.method === 'POST' && url.pathname === '/v1.51/build') {
+				response.setHeader('content-type', 'application/json');
+				response.end(
+					[
+						JSON.stringify({ stream: '#1 [internal] load build definition from Dockerfile' }),
+						JSON.stringify({ aux: { ID: 'sha256:build-image' } }),
+						'',
+					].join('\n'),
+				);
+				return;
+			}
+
+			if (request.method === 'POST' && url.pathname === '/v1.51/images/create') {
+				response.setHeader('content-type', 'application/json');
+				response.end(
+					[
+						JSON.stringify({ status: 'Importing image' }),
+						JSON.stringify({ stream: 'Loaded image: demo/imported:stable' }),
+						'',
+					].join('\n'),
+				);
+				return;
+			}
+
+			response.statusCode = 404;
+			response.end(JSON.stringify({ message: 'not found' }));
+		});
+	});
+
+	try {
+		await listen(server, undefined, '127.0.0.1');
+
+		const address = server.address();
+		assert.notEqual(address, null);
+		assert.equal(typeof address, 'object');
+
+		const client = new DockerApiClient({
+			apiVersion: '1.51',
+			connectionMode: 'tcp',
+			host: '127.0.0.1',
+			port: address.port,
+		});
+		const buildResponse = await client.buildImage({
+			body: Buffer.from('build-context'),
+			buildArgs: { NODE_ENV: 'production' },
+			dockerfile: 'docker/Dockerfile',
+			forceRm: true,
+			labels: { 'org.opencontainers.image.source': 'n8n' },
+			networkMode: 'host',
+			noCache: true,
+			platform: 'linux/amd64',
+			pull: true,
+			quiet: true,
+			registryConfig: {
+				'registry.example.com': {
+					password: 'secret',
+					serveraddress: 'registry.example.com',
+					username: 'janedoe',
+				},
+			},
+			rm: false,
+			tags: ['demo:latest', 'demo:1.0.0'],
+			target: 'runtime',
+			timeoutMs: 0,
+			version: '2',
+		});
+		const buildBuffer = await collectDockerStreamResponse(buildResponse);
+		const importResponse = await client.importImage({
+			body: Buffer.from('image-archive'),
+			changes: ['ENV DEBUG=true', 'CMD ["node"]'],
+			message: 'imported from tar',
+			platform: 'linux/amd64',
+			repo: 'demo/imported',
+			tag: 'stable',
+			timeoutMs: 0,
+		});
+		const importBuffer = await collectDockerStreamResponse(importResponse);
+
+		assert.equal(buildBuffer.toString('utf8').includes('sha256:build-image'), true);
+		assert.equal(importBuffer.toString('utf8').includes('Loaded image: demo/imported:stable'), true);
+
+		const buildRequest = requests.find(({ method, url }) =>
+			method === 'POST' && url.pathname === '/v1.51/build',
+		);
+		assert.equal(buildRequest.headers['content-type'], 'application/x-tar');
+		assert.equal(buildRequest.body.toString('utf8'), 'build-context');
+		assert.deepEqual(buildRequest.url.searchParams.getAll('t'), ['demo:latest', 'demo:1.0.0']);
+		assert.equal(buildRequest.url.searchParams.get('dockerfile'), 'docker/Dockerfile');
+		assert.equal(buildRequest.url.searchParams.get('pull'), '1');
+		assert.equal(buildRequest.url.searchParams.get('nocache'), '1');
+		assert.equal(buildRequest.url.searchParams.get('q'), '1');
+		assert.equal(buildRequest.url.searchParams.get('rm'), '0');
+		assert.equal(buildRequest.url.searchParams.get('forcerm'), '1');
+		assert.equal(buildRequest.url.searchParams.get('platform'), 'linux/amd64');
+		assert.equal(buildRequest.url.searchParams.get('target'), 'runtime');
+		assert.equal(buildRequest.url.searchParams.get('version'), '2');
+		assert.deepEqual(
+			JSON.parse(buildRequest.url.searchParams.get('buildargs')),
+			{ NODE_ENV: 'production' },
+		);
+		assert.deepEqual(
+			JSON.parse(buildRequest.url.searchParams.get('labels')),
+			{ 'org.opencontainers.image.source': 'n8n' },
+		);
+		assert.deepEqual(
+			JSON.parse(Buffer.from(buildRequest.headers['x-registry-config'], 'base64url').toString('utf8')),
+			{
+				'registry.example.com': {
+					password: 'secret',
+					serveraddress: 'registry.example.com',
+					username: 'janedoe',
+				},
+			},
+		);
+
+		const importRequest = requests.find(({ method, url }) =>
+			method === 'POST' && url.pathname === '/v1.51/images/create',
+		);
+		assert.equal(importRequest.headers['content-type'], 'application/octet-stream');
+		assert.equal(importRequest.body.toString('utf8'), 'image-archive');
+		assert.equal(importRequest.url.searchParams.get('fromSrc'), '-');
+		assert.equal(importRequest.url.searchParams.get('repo'), 'demo/imported');
+		assert.equal(importRequest.url.searchParams.get('tag'), 'stable');
+		assert.equal(importRequest.url.searchParams.get('message'), 'imported from tar');
+		assert.equal(importRequest.url.searchParams.get('platform'), 'linux/amd64');
+		assert.deepEqual(importRequest.url.searchParams.getAll('changes'), [
+			'ENV DEBUG=true',
+			'CMD ["node"]',
+		]);
+	} finally {
+		server.closeAllConnections();
+		server.close();
+	}
+});
+
+test('DockerApiClient allows request-level timeout overrides for build streams', async () => {
+	const server = http.createServer((request, response) => {
+		const url = new URL(request.url, 'http://127.0.0.1');
+
+		if (request.method === 'POST' && url.pathname === '/v1.51/build') {
+			setTimeout(() => {
+				response.setHeader('content-type', 'application/json');
+				response.end(`${JSON.stringify({ stream: 'build complete' })}\n`);
+			}, 10);
+			return;
+		}
+
+		response.statusCode = 404;
+		response.end(JSON.stringify({ message: 'not found' }));
+	});
+
+	try {
+		await listen(server, undefined, '127.0.0.1');
+
+		const address = server.address();
+		assert.notEqual(address, null);
+		assert.equal(typeof address, 'object');
+
+		const client = new DockerApiClient(
+			{
+				apiVersion: '1.51',
+				connectionMode: 'tcp',
+				host: '127.0.0.1',
+				port: address.port,
+			},
+			{ timeoutMs: 1 },
+		);
+		const response = await client.buildImage({
+			body: Buffer.from('build-context'),
+			timeoutMs: 50,
+			version: '2',
+		});
+		const buffer = await collectDockerStreamResponse(response);
+
+		assert.equal(buffer.toString('utf8').includes('build complete'), true);
 	} finally {
 		server.closeAllConnections();
 		server.close();

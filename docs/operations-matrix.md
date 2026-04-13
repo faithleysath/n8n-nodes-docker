@@ -9,7 +9,7 @@
 | Docker | MVP | AI-usable container 深化 | 完整核心资源 | 流式增强 | 与 Build 联动 | 成熟化 |
 | Docker Files | - | 首发（二进制 container 文件） | 扩展到 image save/load | 扩展 | 与 Build 联动 | 成熟化 |
 | Docker Trigger | - | - | 规划 | 首发 | 强化 | 成熟化 |
-| Docker Build | - | - | 规划 | 规划 | 首发 | 成熟化 |
+| Docker Build | - | - | 规划 | 规划 | 首发（build/import） | 成熟化 |
 | Docker Registry | - | - | - | - | 可选 | 可选 |
 
 ## 资源矩阵
@@ -17,7 +17,7 @@
 | 资源 | Phase 1 | Phase 2 | Phase 3 | Phase 4 | Phase 5 | Phase 6 |
 | --- | --- | --- | --- | --- | --- | --- |
 | container | 基础 | 深化 | 完整 | 流式增强 | 与 build 联动 | 成熟化 |
-| image | - | - | 首发 | 增强 | import/export | 成熟化 |
+| image | - | - | 首发 | 增强 | build/import/export | 成熟化 |
 | network | - | - | 首发 | 增强 | - | 成熟化 |
 | volume | - | - | 首发 | 增强 | - | 成熟化 |
 | system | 基础 | 增强 | 深化 | events | build 联动 | 成熟化 |
@@ -112,5 +112,5 @@
 | 0.3.x | Phase 2 | 完整 container deepening |
 | 0.4.x | Phase 3 | image/network/volume/system |
 | 0.5.x | Phase 4 | Docker Trigger 与高级流处理 |
-| 0.6.x | Phase 5 | Build 与 import/export |
+| 0.6.x | Phase 5 | Docker Build 与 image import/export |
 | 1.0.0 | Phase 6 | 完整产品形态 |

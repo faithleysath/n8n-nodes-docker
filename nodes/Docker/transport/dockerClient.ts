@@ -30,6 +30,17 @@ export interface DockerCredentials {
 	socketPath?: string;
 }
 
+export interface DockerRegistryAuthConfig {
+	email?: string;
+	identitytoken?: string;
+	password?: string;
+	registrytoken?: string;
+	serveraddress?: string;
+	username?: string;
+}
+
+export type DockerRegistryConfig = Record<string, DockerRegistryAuthConfig>;
+
 export interface DockerRequestOptions {
 	abortSignal?: AbortSignal;
 	body?: Buffer | string;
@@ -38,6 +49,7 @@ export interface DockerRequestOptions {
 	method?: DockerRequestMethod;
 	path: string;
 	query?: Record<string, DockerQueryValue>;
+	timeoutMs?: number;
 	versioned?: boolean;
 }
 
@@ -156,6 +168,10 @@ function firstHeaderValue(value: string | string[] | undefined): string | undefi
 	return Array.isArray(value) ? value[0] : value;
 }
 
+function encodeDockerAuthHeaderValue(value: DockerRegistryAuthConfig | DockerRegistryConfig): string {
+	return Buffer.from(JSON.stringify(value)).toString('base64url');
+}
+
 function buildQueryString(
 	query: Record<string, DockerQueryValue> | undefined,
 ): string {
@@ -203,6 +219,18 @@ export function normalizeDockerApiVersion(apiVersion: string | undefined): strin
 	}
 
 	return withoutPrefix;
+}
+
+export function encodeDockerRegistryAuth(
+	auth: DockerRegistryAuthConfig,
+): string {
+	return encodeDockerAuthHeaderValue(auth);
+}
+
+export function encodeDockerRegistryConfig(
+	config: DockerRegistryConfig,
+): string {
+	return encodeDockerAuthHeaderValue(config);
 }
 
 export class DockerApiClient {
@@ -649,11 +677,16 @@ export class DockerApiClient {
 	}
 
 	async pullImage(
-		options: { fromImage: string; platform?: string },
+		options: { fromImage: string; platform?: string; registryAuth?: DockerRegistryAuthConfig },
 		abortSignal?: AbortSignal,
 	): Promise<DockerRawResponse> {
 		return this.request({
 			abortSignal,
+			headers: {
+				...(options.registryAuth === undefined
+					? {}
+					: { 'X-Registry-Auth': encodeDockerRegistryAuth(options.registryAuth) }),
+			},
 			method: 'POST',
 			path: '/images/create',
 			query: {
@@ -743,6 +776,99 @@ export class DockerApiClient {
 				platform: options.platform,
 				quiet: options.quiet ?? false,
 			},
+		});
+	}
+
+	async buildImage(
+		options: {
+			body: Buffer;
+			buildArgs?: Record<string, string>;
+			dockerfile?: string;
+			forceRm?: boolean;
+			labels?: Record<string, string>;
+			networkMode?: string;
+			noCache?: boolean;
+			platform?: string;
+			pull?: boolean;
+			quiet?: boolean;
+			registryConfig?: DockerRegistryConfig;
+			rm?: boolean;
+			tags?: string[];
+			target?: string;
+			timeoutMs?: number;
+			version?: '1' | '2';
+		},
+		abortSignal?: AbortSignal,
+	): Promise<DockerStreamResponse> {
+		return this.streamRequest({
+			abortSignal,
+			body: options.body,
+			headers: {
+				'Content-Type': 'application/x-tar',
+				...(options.registryConfig === undefined
+					? {}
+					: { 'X-Registry-Config': encodeDockerRegistryConfig(options.registryConfig) }),
+			},
+			method: 'POST',
+			path: '/build',
+			query: {
+				buildargs:
+					options.buildArgs === undefined || Object.keys(options.buildArgs).length === 0
+						? undefined
+						: JSON.stringify(options.buildArgs),
+				dockerfile: options.dockerfile,
+				forcerm: options.forceRm,
+				labels:
+					options.labels === undefined || Object.keys(options.labels).length === 0
+						? undefined
+						: JSON.stringify(options.labels),
+				networkmode: options.networkMode,
+				nocache: options.noCache,
+				platform: options.platform,
+				pull: options.pull,
+				q: options.quiet,
+				rm: options.rm,
+				t: options.tags,
+				target: options.target,
+				version: options.version,
+			},
+			timeoutMs: options.timeoutMs,
+		});
+	}
+
+	async importImage(
+		options: {
+			body: Buffer;
+			changes?: string[];
+			message?: string;
+			platform?: string;
+			registryAuth?: DockerRegistryAuthConfig;
+			repo?: string;
+			tag?: string;
+			timeoutMs?: number;
+		},
+		abortSignal?: AbortSignal,
+	): Promise<DockerStreamResponse> {
+		return this.streamRequest({
+			abortSignal,
+			body: options.body,
+			headers: {
+				'Content-Type': 'application/octet-stream',
+				...(options.registryAuth === undefined
+					? {}
+					: { 'X-Registry-Auth': encodeDockerRegistryAuth(options.registryAuth) }),
+			},
+			method: 'POST',
+			path: '/images/create',
+			query: {
+				changes: options.changes === undefined || options.changes.length === 0 ? undefined : options.changes,
+				fromSrc: '-',
+				message: options.message,
+				platform: options.platform,
+				repo: options.repo,
+				tag: options.tag,
+			},
+			timeoutMs: options.timeoutMs,
 		});
 	}
 
@@ -936,6 +1062,7 @@ export class DockerApiClient {
 		await this.validateConnectionSettings();
 
 		const method = options.method ?? 'GET';
+		const timeoutMs = options.timeoutMs ?? this.timeoutMs;
 		const requestPath = await this.buildRequestPath(
 			options.path,
 			options.query,
@@ -1004,6 +1131,12 @@ export class DockerApiClient {
 				);
 			});
 
+			if (timeoutMs > 0) {
+				request.setTimeout(timeoutMs, () => {
+					request.destroy(new Error(`Docker request timed out after ${timeoutMs} ms.`));
+				});
+			}
+
 			if (options.body !== undefined) {
 				request.write(options.body);
 			}
@@ -1016,6 +1149,7 @@ export class DockerApiClient {
 		await this.validateConnectionSettings();
 
 		const method = options.method ?? 'GET';
+		const timeoutMs = options.timeoutMs ?? this.timeoutMs;
 		const requestPath = await this.buildRequestPath(
 			options.path,
 			options.query,
@@ -1080,9 +1214,11 @@ export class DockerApiClient {
 				);
 			});
 
-			request.setTimeout(this.timeoutMs, () => {
-				request.destroy(new Error(`Docker request timed out after ${this.timeoutMs} ms.`));
-			});
+			if (timeoutMs > 0) {
+				request.setTimeout(timeoutMs, () => {
+					request.destroy(new Error(`Docker request timed out after ${timeoutMs} ms.`));
+				});
+			}
 
 			if (options.body !== undefined) {
 				request.write(options.body);

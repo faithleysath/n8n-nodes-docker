@@ -67,6 +67,7 @@
 职责：
 
 - `build`
+- `import`
 - 更重的 image import/export
 - 大 tar 包与 BuildKit 流
 
@@ -75,6 +76,7 @@
 - 输入输出是 tar/stream
 - 运行时间可能很长
 - 进度日志和普通 JSON 返回差异很大
+- 需要单独处理超时、取消和流式输出聚合
 
 ## 3. 凭证设计
 
@@ -147,6 +149,9 @@ nodes/Docker/
 nodes/DockerFiles/
 ├── DockerFiles.node.ts
 └── DockerFiles.node.json
+nodes/DockerBuild/
+├── DockerBuild.node.ts
+└── DockerBuild.node.json
 ```
 
 ### 节点层
@@ -180,6 +185,7 @@ nodes/DockerFiles/
 
 - tar 与 binary 互转
 - log / event stream 解析
+- build / import JSON-line 输出归一化
 - 错误信息标准化
 
 ## 5. SDK 选型建议
@@ -246,6 +252,8 @@ Docker 文件导入导出不能只按普通文本字段来做，必须和 n8n bi
 
 文件相关操作返回 binary，并单独放入 `Docker Files` 节点。
 
+Build 与 import 相关操作返回 JSON，但输入是 binary tar，且默认走流式聚合模式，因此单独放入 `Docker Build` 节点。
+
 ## 8. 安全设计
 
 这类节点不能按普通 SaaS API 节点处理。
@@ -254,6 +262,7 @@ Docker 文件导入导出不能只按普通文本字段来做，必须和 n8n bi
 
 - `readOnly` 凭证默认禁止写操作
 - `fullControl` 才允许 `create / delete / exec / pull / tag / copyTo / copyFrom / export / save / load / prune`
+- `fullControl` 也必须允许 `build / import`
 - `system prune`、`image remove`、`container remove --force` 等危险动作必须单独显式参数开启
 - `Docker` 主节点默认启用 AI tool 模式，但只暴露非 binary 的 JSON / 文本操作
 - `Docker Files` 节点不启用 AI tool 模式
@@ -275,6 +284,7 @@ Docker 文件导入导出不能只按普通文本字段来做，必须和 n8n bi
 
 - container lifecycle
 - image pull/remove
+- image build/import
 - exec
 - copyTo / copyFrom
 - network / volume
@@ -298,6 +308,7 @@ Docker 文件导入导出不能只按普通文本字段来做，必须和 n8n bi
 - `0.3.x` 完整 container deepening
 - `0.4.x` image + network + volume + system
 - `0.5.x` trigger + advanced streaming
-- `0.6.x+` build / registry / advanced workflows
+- `0.6.x` build / import / advanced workflows
+- `0.7.x+` registry / advanced workflows
 
 在到达完整能力之前，不建议把包对外宣传成“full Docker management for n8n”。

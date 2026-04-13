@@ -423,7 +423,11 @@ if (!shouldRun) {
 
 			await client.createContainer({
 				body: {
-					Cmd: ['sh', '-c', 'printf phase4-one\\n; sleep 1; printf phase4-two\\n; sleep 5'],
+					Cmd: [
+						'sh',
+						'-c',
+						'sleep 1; i=0; while [ "$i" -lt 5 ]; do printf "phase4-%s\\n" "$i"; i=$((i+1)); sleep 1; done',
+					],
 					Image: 'alpine:3.20',
 				},
 				name: logContainerName,
@@ -433,7 +437,7 @@ if (!shouldRun) {
 			const logAbortController = new AbortController();
 			const logTimeout = setTimeout(() => {
 				logAbortController.abort();
-			}, 2_500);
+			}, 3_500);
 			const logsResponse = await client.streamContainerLogs(
 				logContainerName,
 				{
@@ -452,11 +456,87 @@ if (!shouldRun) {
 			clearTimeout(logTimeout);
 			const logs = parseDockerRawStream(logsBuffer, logsResponse.headers['content-type']);
 
-			assert.equal(logs.streamText.stdout.includes('phase4-one'), true);
-			assert.equal(logs.streamText.stdout.includes('phase4-two'), true);
+			assert.equal(logs.streamText.stdout.includes('phase4-0'), true);
+			assert.equal(logs.streamText.stdout.includes('phase4-1'), true);
 		} finally {
 			dockerAllowFailure('rm', '-f', eventContainerName);
 			dockerAllowFailure('rm', '-f', logContainerName);
+		}
+	});
+
+	test('Docker integration covers Phase 5 build and import streaming endpoints', async () => {
+		docker('version');
+		ensureImage('alpine:3.20');
+
+		const client = createClient();
+		const testId = randomUUID().slice(0, 8);
+		const builtImage = `n8n-phase5-build:${testId}`;
+		const importRepository = `n8n-phase5-import-${testId}`;
+		const importedImage = `${importRepository}:latest`;
+		const exportContainerName = `n8n-phase5-export-${testId}`;
+
+		try {
+			const buildContext = await createSingleFileTarArchive(
+				'Dockerfile',
+				Buffer.from('FROM alpine:3.20\nRUN printf phase5-build >/build-proof.txt\n'),
+			);
+			const buildResponse = await client.buildImage({
+				body: buildContext,
+				tags: [builtImage],
+				timeoutMs: 0,
+				version: '2',
+			});
+			const buildBuffer = await collectDockerStreamResponse(buildResponse);
+			const buildMessages = parseDockerJsonLines(
+				buildBuffer,
+				buildResponse.headers['content-type'],
+			);
+
+			assert.equal(buildMessages.entries.length > 0, true);
+			assert.equal(
+				buildMessages.entries.some((entry) => entry.aux?.ID !== undefined || entry.stream !== undefined),
+				true,
+			);
+
+			const inspectedBuiltImage = await client.inspectImage(builtImage);
+			assert.equal(typeof inspectedBuiltImage.Id, 'string');
+
+			await client.createContainer({
+				body: {
+					Cmd: ['sh', '-c', 'printf imported-phase5 >/import-proof.txt'],
+					Image: 'alpine:3.20',
+				},
+				name: exportContainerName,
+			});
+			await client.startContainer(exportContainerName);
+			await client.waitForContainer(exportContainerName, {
+				condition: 'not-running',
+			});
+
+			const exported = await client.exportContainer(exportContainerName);
+			assert.equal(exported.body.length > 0, true);
+
+			const importResponse = await client.importImage({
+				body: exported.body,
+				message: 'phase5 import integration',
+				repo: importRepository,
+				tag: 'latest',
+				timeoutMs: 0,
+			});
+			const importBuffer = await collectDockerStreamResponse(importResponse);
+			const importMessages = parseDockerJsonLines(
+				importBuffer,
+				importResponse.headers['content-type'],
+			);
+
+			assert.equal(importMessages.entries.length > 0, true);
+
+			const inspectedImportedImage = await client.inspectImage(importedImage);
+			assert.equal(typeof inspectedImportedImage.Id, 'string');
+		} finally {
+			dockerAllowFailure('rm', '-f', exportContainerName);
+			dockerAllowFailure('image', 'rm', '-f', builtImage);
+			dockerAllowFailure('image', 'rm', '-f', importedImage);
 		}
 	});
 	}

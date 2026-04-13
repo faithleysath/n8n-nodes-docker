@@ -2,6 +2,7 @@ const assert = require('node:assert/strict');
 const test = require('node:test');
 
 const { Docker } = require('../dist/nodes/Docker/Docker.node.js');
+const { DockerBuild } = require('../dist/nodes/DockerBuild/DockerBuild.node.js');
 const { DockerFiles } = require('../dist/nodes/DockerFiles/DockerFiles.node.js');
 const { DockerTrigger } = require('../dist/nodes/DockerTrigger/DockerTrigger.node.js');
 const { evaluateExecPolicy } = require('../dist/nodes/Docker/utils/execPolicy.js');
@@ -13,15 +14,18 @@ const {
 
 test('Docker remains AI-usable while Docker Files is not', () => {
 	const dockerNode = new Docker();
+	const dockerBuildNode = new DockerBuild();
 	const dockerFilesNode = new DockerFiles();
 	const dockerTriggerNode = new DockerTrigger();
 
 	assert.equal(dockerNode.description.usableAsTool, true);
+	assert.notEqual(dockerBuildNode.description.usableAsTool, true);
 	assert.notEqual(dockerFilesNode.description.usableAsTool, true);
 	assert.notEqual(dockerTriggerNode.description.usableAsTool, true);
 	assert.deepEqual(dockerTriggerNode.description.group, ['trigger']);
 	assert.deepEqual(dockerTriggerNode.description.inputs, []);
 	assert.deepEqual(dockerTriggerNode.description.outputs, ['main']);
+	assert.equal(dockerBuildNode.description.credentials[0].name, 'dockerApi');
 
 	const dockerContainerOperationProperty = dockerNode.description.properties.find(
 		(property) =>
@@ -58,6 +62,9 @@ test('Docker remains AI-usable while Docker Files is not', () => {
 			property.name === 'operation' &&
 			property.displayOptions?.show?.resource?.includes?.('image'),
 	);
+	const dockerBuildOperationProperty = dockerBuildNode.description.properties.find(
+		(property) => property.name === 'operation',
+	);
 
 	assert.deepEqual(
 		dockerContainerOperationProperty.options.map((option) => option.value),
@@ -86,6 +93,10 @@ test('Docker remains AI-usable while Docker Files is not', () => {
 	assert.deepEqual(
 		dockerFilesImageOperationProperty.options.map((option) => option.value),
 		['load', 'save'],
+	);
+	assert.deepEqual(
+		dockerBuildOperationProperty.options.map((option) => option.value),
+		['build', 'import'],
 	);
 	assert.deepEqual(
 		dockerTriggerNode.description.properties

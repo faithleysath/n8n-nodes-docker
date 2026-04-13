@@ -1,3 +1,11 @@
+## 0.6.0 - 2026-04-13
+
+- Added a dedicated `Docker Build` node for tar-based `build` and `import` workflows with aggregate or split streamed output modes
+- Extended the custom Docker transport with streamed `POST /build` and `POST /images/create?fromSrc=-` support, request-level timeout overrides, and registry auth/config header helpers
+- Added shared build/import JSON-line normalization utilities that extract BuildKit aux metadata, preserve raw lines, and keep continue-on-fail behavior consistent
+- Added Phase 5 unit and optional integration coverage for build/import transport, node execution, timeout handling, metadata exposure, and real-daemon streaming behavior
+- Updated package metadata, README, architecture docs, roadmap, and operations matrix for the `0.6.x` Phase 5 release surface
+
 ## 0.5.0 - 2026-04-13
 
 - Added a dedicated `Docker Trigger` node with Docker event filters, stored cursor replay, duplicate suppression, manual trigger support, and reconnect backoff

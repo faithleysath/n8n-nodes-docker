@@ -1,6 +1,6 @@
 {
 	"name": "@faithleysath/n8n-nodes-docker",
-	"version": "0.5.0",
+	"version": "0.6.0",
 	"description": "Docker community nodes for n8n self-hosted instances",
 	"license": "MIT",
 	"homepage": "https://github.com/faithleysath/n8n-nodes-docker",
@@ -49,6 +49,7 @@
 		],
 		"nodes": [
 			"dist/nodes/Docker/Docker.node.js",
+			"dist/nodes/DockerBuild/DockerBuild.node.js",
 			"dist/nodes/DockerFiles/DockerFiles.node.js",
 			"dist/nodes/DockerTrigger/DockerTrigger.node.js"
 		]

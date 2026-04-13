@@ -231,7 +231,7 @@
 
 - `Docker Build` 节点
 - 更重的 tar / image import/export 流程
-- registry 相关能力的第一版
+- registry 相关能力的第一版预留
 
 ### 建议能力
 
@@ -253,6 +253,15 @@
 
 - registry auth 预留
 - 私有镜像拉取/推送规划
+
+### 当前落地
+
+- `Docker Build` 节点首发
+- 已实现 tar-based `build`
+- 已实现 tar-based `import`
+- 已实现 build/import 的流式输出解析
+- 已实现 build/import 的取消、超时与 continue-on-fail 执行语义
+- registry auth 目前只保留 transport 扩展点，尚未暴露用户可见的 push/auth 操作
 
 ### 难点
 
@@ -323,7 +332,7 @@
 
 仓库当前处于：
 
-- Phase 4
+- Phase 5
 
 也就是：
 
@@ -331,5 +340,6 @@
 - `Docker` 主节点已经补上 `logs` 流式增强与 `system:events` 游标回放
 - `Docker Files` 已覆盖容器文件导入导出，以及 `image save/load`
 - `Docker Trigger` 已覆盖 Docker event 触发、回放、去重与重连
+- `Docker Build` 已覆盖 tar-based `build` 与 `import`
 - `Unix Socket`、`TCP`、`TLS` 已可用
-- `SSH`、`Docker Build`、`Docker Registry` 仍在后续阶段
+- `SSH` 与完整 `Docker Registry` 生命周期仍在后续阶段

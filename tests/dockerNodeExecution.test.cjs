@@ -3,6 +3,7 @@ const { PassThrough } = require('node:stream');
 const test = require('node:test');
 
 const { Docker } = require('../dist/nodes/Docker/Docker.node.js');
+const { DockerBuild } = require('../dist/nodes/DockerBuild/DockerBuild.node.js');
 const { DockerFiles } = require('../dist/nodes/DockerFiles/DockerFiles.node.js');
 const { DockerTrigger } = require('../dist/nodes/DockerTrigger/DockerTrigger.node.js');
 const {
@@ -60,6 +61,7 @@ function createExecuteContext({
 		connectionMode: 'unixSocket',
 		socketPath: '/var/run/docker.sock',
 	},
+	executionCancelSignal,
 	inputItems = [{ json: {} }],
 	node,
 	parameters,
@@ -73,7 +75,7 @@ function createExecuteContext({
 			return credentials;
 		},
 		getExecutionCancelSignal() {
-			return undefined;
+			return executionCancelSignal;
 		},
 		getInputData() {
 			return inputItems;
@@ -108,6 +110,23 @@ function createExecuteContext({
 				};
 			},
 		},
+	};
+}
+
+function createDockerStreamResponse(body, headers = { 'content-type': 'application/json' }) {
+	const stream = new PassThrough();
+
+	if (body !== undefined) {
+		stream.end(body);
+	}
+
+	return {
+		close() {
+			stream.destroy();
+		},
+		headers,
+		statusCode: 200,
+		stream,
 	};
 }
 
@@ -1412,6 +1431,559 @@ test('Docker Files image load consumes tar binary input and parses JSON-line out
 				'{"stream":"Loaded image: alpine:3.20"}',
 				'{"stream":"Loaded image: busybox:latest"}',
 			]);
+		},
+	);
+});
+
+test('Docker Build build aggregates streamed progress output and extracts aux metadata', async () => {
+	const dockerBuildNode = new DockerBuild();
+	const tarBuffer = Buffer.from('fake-build-context', 'utf8');
+	const context = createExecuteContext({
+		inputItems: [
+			{
+				binary: {
+					contextTar: {
+						data: tarBuffer.toString('base64'),
+						fileName: 'context.tar',
+					},
+				},
+				json: {},
+			},
+		],
+		node: createNodeMetadata('Docker Build', 'dockerBuild'),
+		parameters: {
+			binaryPropertyName: 'contextTar',
+			buildAlwaysRemoveIntermediateContainers: true,
+			buildArgs: {
+				values: [{ name: 'NODE_ENV', value: 'production' }],
+			},
+			buildLabels: {
+				values: [{ name: 'org.opencontainers.image.source', value: 'n8n' }],
+			},
+			buildNetworkMode: 'host',
+			buildNoCache: true,
+			buildPull: true,
+			buildQuiet: true,
+			buildRemoveIntermediateContainers: false,
+			buildTags: {
+				values: [{ value: 'demo:latest' }, { value: 'demo:1.0.0' }],
+			},
+			builderVersion: '2',
+			dockerfilePath: 'docker/Dockerfile',
+			operation: 'build',
+			outputMode: 'aggregate',
+			platform: 'linux/amd64',
+			targetStage: 'runtime',
+			timeoutSeconds: 30,
+		},
+	});
+
+	await withPatchedDockerClient(
+		{
+			accessMode: {
+				get() {
+					return 'fullControl';
+				},
+			},
+			async buildImage(options) {
+				assert.deepEqual(options, {
+					body: tarBuffer,
+					buildArgs: { NODE_ENV: 'production' },
+					dockerfile: 'docker/Dockerfile',
+					forceRm: true,
+					labels: { 'org.opencontainers.image.source': 'n8n' },
+					networkMode: 'host',
+					noCache: true,
+					platform: 'linux/amd64',
+					pull: true,
+					quiet: true,
+					rm: false,
+					tags: ['demo:latest', 'demo:1.0.0'],
+					target: 'runtime',
+					timeoutMs: 0,
+					version: '2',
+				});
+
+				return createDockerStreamResponse(
+					Buffer.from(
+						[
+							JSON.stringify({ stream: '#1 building from tar context' }),
+							JSON.stringify({
+								aux: {
+									Digest: 'sha256:digest-1',
+									ID: 'sha256:image-1',
+									Tags: ['demo:latest', 'demo:1.0.0'],
+								},
+							}),
+							'',
+						].join('\n'),
+					),
+				);
+			},
+		},
+		async () => {
+			const [items] = await dockerBuildNode.execute.call(context);
+
+			assert.equal(items.length, 1);
+			assert.equal(items[0].json.operation, 'build');
+			assert.equal(items[0].json.binaryPropertyName, 'contextTar');
+			assert.equal(items[0].json.bytes, tarBuffer.length);
+			assert.equal(items[0].json.builderVersion, '2');
+			assert.equal(items[0].json.messageCount, 2);
+			assert.equal(items[0].json.imageId, 'sha256:image-1');
+			assert.equal(items[0].json.imageDigest, 'sha256:digest-1');
+			assert.deepEqual(items[0].json.tags, ['demo:latest', 'demo:1.0.0']);
+			assert.deepEqual(items[0].json.namedReferences, ['demo:latest', 'demo:1.0.0']);
+		},
+	);
+});
+
+test('Docker Build build can split streamed progress messages into separate items', async () => {
+	const dockerBuildNode = new DockerBuild();
+	const tarBuffer = Buffer.from('fake-build-context', 'utf8');
+	const context = createExecuteContext({
+		inputItems: [
+			{
+				binary: {
+					contextTar: {
+						data: tarBuffer.toString('base64'),
+						fileName: 'context.tar',
+					},
+				},
+				json: {},
+			},
+		],
+		node: createNodeMetadata('Docker Build', 'dockerBuild'),
+		parameters: {
+			binaryPropertyName: 'contextTar',
+			buildAlwaysRemoveIntermediateContainers: false,
+			buildArgs: { values: [] },
+			buildLabels: { values: [] },
+			buildNetworkMode: '',
+			buildNoCache: false,
+			buildPull: false,
+			buildQuiet: false,
+			buildRemoveIntermediateContainers: true,
+			buildTags: { values: [] },
+			builderVersion: '1',
+			dockerfilePath: 'Dockerfile',
+			operation: 'build',
+			outputMode: 'splitItems',
+			platform: '',
+			targetStage: '',
+			timeoutSeconds: 30,
+		},
+	});
+
+	await withPatchedDockerClient(
+		{
+			accessMode: {
+				get() {
+					return 'fullControl';
+				},
+			},
+			async buildImage() {
+				return createDockerStreamResponse(
+					Buffer.from(
+						[
+							JSON.stringify({ stream: 'Step 1/2 : FROM alpine:3.20' }),
+							JSON.stringify({ stream: 'Successfully built sha256:image-2' }),
+							'',
+						].join('\n'),
+					),
+				);
+			},
+		},
+		async () => {
+			const [items] = await dockerBuildNode.execute.call(context);
+
+			assert.equal(items.length, 2);
+			assert.equal(items[0].json.operation, 'build');
+			assert.equal(items[0].json.messageIndex, 0);
+			assert.equal(items[0].json.stream, 'Step 1/2 : FROM alpine:3.20');
+			assert.equal(items[1].json.messageIndex, 1);
+			assert.equal(items[1].json.stream, 'Successfully built sha256:image-2');
+		},
+	);
+});
+
+test('Docker Build surfaces missing binary input as a node operation error', async () => {
+	const dockerBuildNode = new DockerBuild();
+	const context = createExecuteContext({
+		node: createNodeMetadata('Docker Build', 'dockerBuild'),
+		parameters: {
+			binaryPropertyName: 'missingTar',
+			buildAlwaysRemoveIntermediateContainers: false,
+			buildArgs: { values: [] },
+			buildLabels: { values: [] },
+			buildNetworkMode: '',
+			buildNoCache: false,
+			buildPull: false,
+			buildQuiet: false,
+			buildRemoveIntermediateContainers: true,
+			buildTags: { values: [] },
+			builderVersion: '2',
+			dockerfilePath: 'Dockerfile',
+			operation: 'build',
+			outputMode: 'aggregate',
+			timeoutSeconds: 30,
+		},
+	});
+
+	await assert.rejects(async () => await dockerBuildNode.execute.call(context), (error) => {
+		assert.equal(error.name, 'NodeOperationError');
+		assert.equal(
+			error.message.includes('Binary property "missingTar" was not found on the input item.'),
+			true,
+		);
+		return true;
+	});
+});
+
+test('Docker Build times out long-running build streams with a node operation error', async () => {
+	const dockerBuildNode = new DockerBuild();
+	const tarBuffer = Buffer.from('slow-build-context', 'utf8');
+	const context = createExecuteContext({
+		inputItems: [
+			{
+				binary: {
+					contextTar: {
+						data: tarBuffer.toString('base64'),
+						fileName: 'context.tar',
+					},
+				},
+				json: {},
+			},
+		],
+		node: createNodeMetadata('Docker Build', 'dockerBuild'),
+		parameters: {
+			binaryPropertyName: 'contextTar',
+			buildAlwaysRemoveIntermediateContainers: false,
+			buildArgs: { values: [] },
+			buildLabels: { values: [] },
+			buildNetworkMode: '',
+			buildNoCache: false,
+			buildPull: false,
+			buildQuiet: false,
+			buildRemoveIntermediateContainers: true,
+			buildTags: { values: [] },
+			builderVersion: '2',
+			dockerfilePath: 'Dockerfile',
+			operation: 'build',
+			outputMode: 'aggregate',
+			timeoutSeconds: 1,
+		},
+	});
+
+	await withPatchedDockerClient(
+		{
+			accessMode: {
+				get() {
+					return 'fullControl';
+				},
+			},
+			async buildImage() {
+				return createDockerStreamResponse(undefined);
+			},
+		},
+		async () => {
+			await assert.rejects(
+				async () => await dockerBuildNode.execute.call(context),
+				/timed out after 1 seconds/,
+			);
+		},
+	);
+});
+
+test('Docker Build build surfaces Docker request metadata in continue-on-fail payloads', async () => {
+	const dockerBuildNode = new DockerBuild();
+	const tarBuffer = Buffer.from('broken-build-context', 'utf8');
+	const context = createExecuteContext({
+		continueOnFail: true,
+		inputItems: [
+			{
+				binary: {
+					contextTar: {
+						data: tarBuffer.toString('base64'),
+						fileName: 'context.tar',
+					},
+				},
+				json: {},
+			},
+		],
+		node: createNodeMetadata('Docker Build', 'dockerBuild'),
+		parameters: {
+			binaryPropertyName: 'contextTar',
+			buildAlwaysRemoveIntermediateContainers: false,
+			buildArgs: { values: [] },
+			buildLabels: { values: [] },
+			buildNetworkMode: '',
+			buildNoCache: false,
+			buildPull: false,
+			buildQuiet: false,
+			buildRemoveIntermediateContainers: true,
+			buildTags: { values: [] },
+			builderVersion: '2',
+			dockerfilePath: 'Dockerfile',
+			operation: 'build',
+			outputMode: 'aggregate',
+			timeoutSeconds: 30,
+		},
+	});
+
+	await withPatchedDockerClient(
+		{
+			accessMode: {
+				get() {
+					return 'fullControl';
+				},
+			},
+			async buildImage() {
+				throw new DockerRequestError('Docker API request failed with status 500.', {
+					bodyText: '{"message":"build failed"}',
+					details: { message: 'build failed' },
+					method: 'POST',
+					path: '/v1.51/build',
+					statusCode: 500,
+				});
+			},
+		},
+		async () => {
+			const [items] = await dockerBuildNode.execute.call(context);
+
+			assert.equal(items.length, 1);
+			assert.deepEqual(items[0].json, {
+				error: 'Docker API request failed with status 500.',
+				method: 'POST',
+				operation: 'build',
+				path: '/v1.51/build',
+				response: '{"message":"build failed"}',
+				statusCode: 500,
+			});
+		},
+	);
+});
+
+test('Docker Build import aggregates streamed output and inspects the imported image when possible', async () => {
+	const dockerBuildNode = new DockerBuild();
+	const tarBuffer = Buffer.from('fake-image-archive', 'utf8');
+	const context = createExecuteContext({
+		inputItems: [
+			{
+				binary: {
+					imageTar: {
+						data: tarBuffer.toString('base64'),
+						fileName: 'image.tar',
+					},
+				},
+				json: {},
+			},
+		],
+		node: createNodeMetadata('Docker Build', 'dockerBuild'),
+		parameters: {
+			binaryPropertyName: 'imageTar',
+			importChanges: {
+				values: [{ value: 'ENV DEBUG=true' }, { value: 'CMD [\"node\"]' }],
+			},
+			importMessage: 'imported from tar',
+			importRepository: 'demo/imported',
+			importTag: 'stable',
+			operation: 'import',
+			outputMode: 'aggregate',
+			platform: 'linux/amd64',
+			timeoutSeconds: 30,
+		},
+	});
+
+	await withPatchedDockerClient(
+		{
+			accessMode: {
+				get() {
+					return 'fullControl';
+				},
+			},
+			async importImage(options) {
+				assert.deepEqual(options, {
+					body: tarBuffer,
+					changes: ['ENV DEBUG=true', 'CMD ["node"]'],
+					message: 'imported from tar',
+					platform: 'linux/amd64',
+					repo: 'demo/imported',
+					tag: 'stable',
+					timeoutMs: 0,
+				});
+
+				return createDockerStreamResponse(
+					Buffer.from(
+						[
+							JSON.stringify({ status: 'Importing image' }),
+							JSON.stringify({ stream: 'Loaded image: demo/imported:stable' }),
+							'',
+						].join('\n'),
+					),
+				);
+			},
+			async inspectImage(reference) {
+				assert.equal(reference, 'demo/imported:stable');
+				return {
+					Id: 'sha256:imported',
+					RepoTags: ['demo/imported:stable'],
+				};
+			},
+		},
+		async () => {
+			const [items] = await dockerBuildNode.execute.call(context);
+
+			assert.equal(items.length, 1);
+			assert.equal(items[0].json.operation, 'import');
+			assert.equal(items[0].json.binaryPropertyName, 'imageTar');
+			assert.equal(items[0].json.bytes, tarBuffer.length);
+			assert.equal(items[0].json.repository, 'demo/imported');
+			assert.equal(items[0].json.tag, 'stable');
+			assert.equal(items[0].json.message, 'imported from tar');
+			assert.deepEqual(items[0].json.changes, ['ENV DEBUG=true', 'CMD ["node"]']);
+			assert.equal(items[0].json.messageCount, 2);
+			assert.deepEqual(items[0].json.image, {
+				Id: 'sha256:imported',
+				RepoTags: ['demo/imported:stable'],
+			});
+		},
+	);
+});
+
+test('Docker Build import timeout covers the post-import inspect step end-to-end', async () => {
+	const dockerBuildNode = new DockerBuild();
+	const tarBuffer = Buffer.from('fake-image-archive', 'utf8');
+	const context = createExecuteContext({
+		inputItems: [
+			{
+				binary: {
+					imageTar: {
+						data: tarBuffer.toString('base64'),
+						fileName: 'image.tar',
+					},
+				},
+				json: {},
+			},
+		],
+		node: createNodeMetadata('Docker Build', 'dockerBuild'),
+		parameters: {
+			binaryPropertyName: 'imageTar',
+			importChanges: { values: [] },
+			importMessage: '',
+			importRepository: 'demo/imported',
+			importTag: 'stable',
+			operation: 'import',
+			outputMode: 'aggregate',
+			platform: '',
+			timeoutSeconds: 1,
+		},
+	});
+
+	await withPatchedDockerClient(
+		{
+			accessMode: {
+				get() {
+					return 'fullControl';
+				},
+			},
+			async importImage() {
+				return createDockerStreamResponse(
+					Buffer.from(
+						[
+							JSON.stringify({ status: 'Importing image' }),
+							JSON.stringify({ stream: 'Loaded image: demo/imported:stable' }),
+							'',
+						].join('\n'),
+					),
+				);
+			},
+			async inspectImage() {
+				await new Promise((resolve) => setTimeout(resolve, 1_500));
+				return {
+					Id: 'sha256:imported',
+					RepoTags: ['demo/imported:stable'],
+				};
+			},
+		},
+		async () => {
+			const startedAt = Date.now();
+
+			await assert.rejects(
+				async () => await dockerBuildNode.execute.call(context),
+				/timed out after 1 seconds/,
+			);
+			assert.equal(Date.now() - startedAt < 1_400, true);
+		},
+	);
+});
+
+test('Docker Build import does not swallow cancellation during the post-import inspect step', async () => {
+	const dockerBuildNode = new DockerBuild();
+	const tarBuffer = Buffer.from('fake-image-archive', 'utf8');
+	const abortController = new AbortController();
+	const context = createExecuteContext({
+		executionCancelSignal: abortController.signal,
+		inputItems: [
+			{
+				binary: {
+					imageTar: {
+						data: tarBuffer.toString('base64'),
+						fileName: 'image.tar',
+					},
+				},
+				json: {},
+			},
+		],
+		node: createNodeMetadata('Docker Build', 'dockerBuild'),
+		parameters: {
+			binaryPropertyName: 'imageTar',
+			importChanges: { values: [] },
+			importMessage: '',
+			importRepository: 'demo/imported',
+			importTag: 'stable',
+			operation: 'import',
+			outputMode: 'aggregate',
+			platform: '',
+			timeoutSeconds: 30,
+		},
+	});
+
+	await withPatchedDockerClient(
+		{
+			accessMode: {
+				get() {
+					return 'fullControl';
+				},
+			},
+			async importImage() {
+				return createDockerStreamResponse(
+					Buffer.from(
+						[
+							JSON.stringify({ status: 'Importing image' }),
+							JSON.stringify({ stream: 'Loaded image: demo/imported:stable' }),
+							'',
+						].join('\n'),
+					),
+				);
+			},
+			async inspectImage() {
+				setTimeout(() => abortController.abort(), 50);
+				await new Promise((resolve) => setTimeout(resolve, 500));
+				return {
+					Id: 'sha256:imported',
+					RepoTags: ['demo/imported:stable'],
+				};
+			},
+		},
+		async () => {
+			const startedAt = Date.now();
+
+			await assert.rejects(
+				async () => await dockerBuildNode.execute.call(context),
+				/was cancelled/,
+			);
+			assert.equal(Date.now() - startedAt < 400, true);
 		},
 	);
 });

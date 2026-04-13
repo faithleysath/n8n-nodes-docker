@@ -8,11 +8,12 @@
 - `Docker` 主节点的 Phase 4 JSON / 文本资源能力
 - `Docker Files` 节点的二进制 / tar 文件能力，包括容器文件归档和 image save/load
 - `Docker Trigger` 节点的 Docker events 触发能力
+- `Docker Build` 节点的 tar-based image build 与 image import 能力
 - `Docker API` 凭证的可运行连接模型
-- 针对 transport、exec policy、tar 工具和节点边界的自动化测试
+- 针对 transport、exec policy、tar/build 工具和节点边界的自动化测试
 - 从第一期到完全体的分阶段交付文档
 
-这个仓库还**没有**完成完整 Docker 产品矩阵。当前版本已经落地了容器、镜像、网络、卷、daemon metadata、日志/事件流增强，以及独立的 Docker Trigger 和文件导入导出能力；后续 build、registry、SSH 等能力仍按路线图继续推进。
+这个仓库还**没有**完成完整 Docker 产品矩阵。当前版本已经落地了容器、镜像、网络、卷、daemon metadata、日志/事件流增强、独立的 Docker Trigger、文件导入导出，以及第一版 Docker Build；后续 registry、SSH 和更高阶产品化能力仍按路线图继续推进。
 
 ## 目标
 
@@ -29,7 +30,7 @@
 
 ## 规划中的节点族
 
-当前仓库已经落下三个节点，完整形态预计包含：
+当前仓库已经落下四个节点，完整形态预计包含：
 
 - `Docker`
   负责容器、镜像、网络、卷、system 等资源的 CRUD 与运维操作
@@ -38,7 +39,7 @@
 - `Docker Trigger`
   监听或轮询 Docker events，把 daemon 事件转成工作流触发源
 - `Docker Build`
-  单独承接 build context、BuildKit、镜像导入导出、长时间运行任务
+  单独承接 build context、BuildKit、image import、长时间运行任务
 - `Docker Registry`
   后续如果需要，再把 registry auth、manifest、tag 生命周期独立出来
 
@@ -65,7 +66,7 @@ Docker daemon 的写权限基本等价于宿主机高权限控制，所以这个
 
 ## 开发状态
 
-当前版本：`0.5.0`
+当前版本：`0.6.0`
 
 当前实现状态：
 
@@ -114,14 +115,16 @@ Docker daemon 的写权限基本等价于宿主机高权限控制，所以这个
 - 已实现 `Docker Files:export`
 - 已实现 `Docker Files:image:save`
 - 已实现 `Docker Files:image:load`
+- 已实现 `Docker Build:build`
+- 已实现 `Docker Build:import`
 - 已支持 `Unix Socket`、`TCP`、`TLS`
 - 已实现 `readOnly` / `fullControl` 危险操作门禁
 - 已加入 transport、exec policy、tar 工具、节点元数据与可选集成测试
-- `SSH` / `build` / `registry` 仍未实现
+- `SSH` / `registry` 仍未实现
 
 ## 当前节点范围
 
-当前包暴露三个节点：
+当前包暴露四个节点：
 
 - `Docker`
   资源范围是 `Container`、`Image`、`Network`、`Volume` 和 `System`
@@ -132,6 +135,9 @@ Docker daemon 的写权限基本等价于宿主机高权限控制，所以这个
 - `Docker Trigger`
   负责监听 Docker events，带游标回放、去重和重连
   这个节点不作为 AI 工具，用来隔离 trigger 生命周期和长连接状态
+- `Docker Build`
+  负责 tar-based `build` 与 `import`
+  这个节点不作为 AI 工具，用来隔离 binary 输入、流式进度输出和长时间运行任务
 
 这版是典型的 **programmatic-style node**，不是 declarative-style。原因是 Docker 的 Unix socket 连接、API version 协商、exec / logs raw-stream 解复用、archive/tar 处理、以及写操作门禁都不适合只靠 declarative routing 来表达。
 
@@ -147,7 +153,7 @@ Docker daemon 的写权限基本等价于宿主机高权限控制，所以这个
 
 - `API Version` 默认为 `auto`，会在首次请求时自动协商
 - `Access Mode = Read Only` 时，只允许 `container:list/inspect/logs/top/stats/wait`、`image:list/inspect/history`、`network:list/inspect`、`volume:list/inspect`、`system:df/events/ping/info/version`
-- `Access Mode = Full Control` 才允许 `create`、`update`、`exec`、`start`、`stop`、`restart`、`remove`、`pull`、`tag`、网络和卷变更，以及 `Docker Files` 的 `copyTo` / `copyFrom` / `export` / `image save` / `image load`
+- `Access Mode = Full Control` 才允许 `create`、`update`、`exec`、`start`、`stop`、`restart`、`remove`、`pull`、`tag`、网络和卷变更，以及 `Docker Files` 的 `copyTo` / `copyFrom` / `export` / `image save` / `image load` 和 `Docker Build` 的 `build` / `import`
 - 由于 n8n 的静态 credential request 模型不适合 Docker Unix socket，这个版本改用 node-level credential test 来校验 `Unix Socket`、`TCP`、`TLS` 连接，而不是提供一个误导性的“假测试”
 
 ## 文档导航
@@ -196,9 +202,12 @@ n8n-nodes-docker/
 │   │   ├── utils/
 │   │   ├── docker.svg
 │   │   └── docker.dark.svg
-│   └── DockerFiles/
-│       ├── DockerFiles.node.ts
-│       └── DockerFiles.node.json
+│   ├── DockerBuild/
+│   │   ├── DockerBuild.node.ts
+│   │   └── DockerBuild.node.json
+│   ├── DockerFiles/
+│   │   ├── DockerFiles.node.ts
+│   │   └── DockerFiles.node.json
 │   └── DockerTrigger/
 │       ├── DockerTrigger.node.ts
 │       └── DockerTrigger.node.json
