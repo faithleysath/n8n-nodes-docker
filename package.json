@@ -1,9 +1,10 @@
 {
 	"name": "n8n-nodes-docker",
-	"version": "0.1.0",
+	"version": "0.2.0",
 	"description": "Docker community nodes for n8n self-hosted instances",
 	"license": "MIT",
 	"homepage": "https://github.com/your-org/n8n-nodes-docker",
+	"packageManager": "pnpm@10.33.0",
 	"keywords": [
 		"n8n-community-node-package",
 		"n8n",
@@ -26,12 +27,17 @@
 		"dev": "n8n-node dev",
 		"lint": "n8n-node lint",
 		"lint:fix": "n8n-node lint --fix",
+		"pretest": "pnpm build",
 		"release": "n8n-node release",
+		"test": "node --test tests/**/*.test.cjs",
 		"prepublishOnly": "n8n-node prerelease"
 	},
 	"files": [
 		"dist"
 	],
+	"publishConfig": {
+		"access": "public"
+	},
 	"n8n": {
 		"n8nNodesApiVersion": 1,
 		"strict": false,

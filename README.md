@@ -1,15 +1,16 @@
 # n8n-nodes-docker
 
-`n8n-nodes-docker` 是一个面向 **n8n 自托管实例** 的 Docker community node 包规划仓库。
+`n8n-nodes-docker` 是一个面向 **n8n 自托管实例** 的 Docker community node 包。
 
-这个仓库现在已经完成了：
+当前已经完成：
 
 - 独立 npm 包骨架
-- `Docker` 主节点的初始结构
-- `Docker API` 凭证骨架
+- `Docker` 主节点的 Phase 1 MVP
+- `Docker API` 凭证的可运行连接模型
+- 针对 transport 和日志解析的最小自动化测试
 - 从第一期到完全体的分阶段交付文档
 
-这个仓库现在还**没有**完成 Docker Engine API 的正式实现。当前节点的执行逻辑会明确提示“这是 scaffold”。这样做是为了先把包结构、路线、边界和交付节奏定稳，再逐期实现功能，避免一开始就把节点做成难维护的大泥球。
+这个仓库还**没有**完成完整 Docker 产品矩阵。当前版本已经落地了容器与 daemon metadata 的 MVP，后续镜像、网络、卷、trigger、build、registry 等能力仍按路线图继续推进。
 
 ## 目标
 
@@ -26,7 +27,7 @@
 
 ## 规划中的节点族
 
-当前仓库先落 `Docker` 主节点骨架，完整形态预计包含：
+当前仓库先落 `Docker` 主节点，完整形态预计包含：
 
 - `Docker`
   负责容器、镜像、网络、卷、system 等资源的 CRUD 与运维操作
@@ -44,9 +45,8 @@
 - `Unix Socket`
 - `TCP`
 - `TLS`
-- `SSH`
 
-这四种模式足够覆盖绝大多数自托管场景。
+当前 Phase 1 已实现前三种；`SSH` 仍在规划中。
 
 ## 安全边界
 
@@ -57,39 +57,78 @@ Docker daemon 的写权限基本等价于宿主机高权限控制，所以这个
 - 优先走 `Unix Socket` 或 `SSH`
 - 如果走远程 TCP，优先要求 TLS
 - 在生产环境优先通过 [docker-socket-proxy](https://github.com/Tecnativa/docker-socket-proxy) 缩小 API 面
-- 当前骨架为了兼容 n8n community node 工具链类型约束，保留了 `usableAsTool: true`；在真正实现危险操作前，建议重新评估 AI tool 暴露策略
 - 将危险操作与只读操作在参数层和执行层都分开
 
 ## 开发状态
 
-当前版本：`0.1.0`
+当前版本：`0.2.0`
 
 当前实现状态：
 
-- 包结构已就位
-- 节点名、图标、元数据已改成 Docker 方向
-- 凭证字段已按最终架构预留
-- 路线文档已覆盖 Phase 1 到完全体
-- 业务实现尚未开始
+- 已实现 `container:list`
+- 已实现 `container:inspect`
+- 已实现 `container:start`
+- 已实现 `container:stop`
+- 已实现 `container:restart`
+- 已实现 `container:remove`
+- 已实现 `container:logs`
+- 已实现 `system:ping`
+- 已实现 `system:info`
+- 已实现 `system:version`
+- 已支持 `Unix Socket`、`TCP`、`TLS`
+- 已实现 `readOnly` / `fullControl` 危险操作门禁
+- 已加入最小自动化测试
+- `image` / `network` / `volume` / `SSH` / `binary` / `trigger` 仍未实现
+
+## 当前节点范围
+
+当前包只暴露一个 `Docker` 节点，资源范围是：
+
+- `Container`
+- `System`
+
+这版是典型的 **programmatic-style node**，不是 declarative-style。原因是 Docker 的 Unix socket 连接、API version 协商、日志 raw-stream 解复用、以及写操作门禁都不适合只靠 declarative routing 来表达。
+
+## 凭证与连接说明
+
+`Docker API` 凭证当前支持：
+
+- `Unix Socket`
+- `TCP`
+- `TLS`
+
+说明：
+
+- `API Version` 默认为 `auto`，会在首次请求时自动协商
+- `Access Mode = Read Only` 时，只允许 `list`、`inspect`、`logs`、`ping`、`info`、`version`
+- `Access Mode = Full Control` 才允许 `start`、`stop`、`restart`、`remove`
+- 由于 n8n 的静态 credential request 模型不适合 Docker Unix socket，这个版本改用 node-level credential test 来校验 `Unix Socket`、`TCP`、`TLS` 连接，而不是提供一个误导性的“假测试”
 
 ## 文档导航
 
 - [架构设计](./docs/architecture.md)
 - [阶段路线图](./docs/roadmap.md)
 - [能力矩阵](./docs/operations-matrix.md)
+- [npm 发布指南](./docs/publishing.md)
 
 ## 本地开发
 
 ```bash
 pnpm install
-pnpm build
 pnpm lint
+pnpm test
 ```
 
 如需把这个包接到本地 n8n 做联调：
 
 ```bash
 pnpm dev
+```
+
+如果只想单独构建产物：
+
+```bash
+pnpm build
 ```
 
 ## 仓库结构
@@ -119,3 +158,12 @@ n8n-nodes-docker/
 - `package.json > repository.url`
 
 当前我先用了 `https://github.com/your-org/n8n-nodes-docker` 作为明确占位值，避免误指向一个不存在但看起来像真的地址。
+
+## 公开发布提示
+
+如果你准备把这个包公开发布到 npm，请先注意两点：
+
+- `n8n-nodes-docker` 这个包名已经被别人占用，建议改成 `@你的-npm-用户名/n8n-nodes-docker`
+- 当前仓库还没有配置真实的 GitHub 远端，`package.json` 的仓库地址也仍是占位值
+
+第一次发布前，按 [npm 发布指南](./docs/publishing.md) 走一遍会最稳。

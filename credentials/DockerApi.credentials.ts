@@ -9,13 +9,14 @@ export class DockerApi implements ICredentialType {
 
 	icon: Icon = 'file:icons/docker.svg';
 
-	test = {
-		request: {
-			baseURL: 'http://localhost/credential-test-not-implemented',
-		},
-	};
-
 	properties: INodeProperties[] = [
+		{
+			displayName:
+				'Phase 1 supports Unix Socket, TCP, and TLS. SSH is planned for a later phase because n8n credential tests do not support Docker-over-SSH transport out of the box.',
+			name: 'phaseOneNotice',
+			type: 'notice',
+			default: '',
+		},
 		{
 			displayName: 'Connection Mode',
 			name: 'connectionMode',
@@ -37,11 +38,6 @@ export class DockerApi implements ICredentialType {
 					value: 'tls',
 					description: 'Connect to a remote Docker daemon over mutual TLS',
 				},
-				{
-					name: 'SSH',
-					value: 'ssh',
-					description: 'Connect to a Docker host through SSH',
-				},
 			],
 		},
 		{
@@ -60,9 +56,10 @@ export class DockerApi implements ICredentialType {
 			name: 'host',
 			type: 'string',
 			default: 'localhost',
+			required: true,
 			displayOptions: {
 				show: {
-					connectionMode: ['tcp', 'tls', 'ssh'],
+					connectionMode: ['tcp', 'tls'],
 				},
 			},
 			placeholder: 'docker.example.internal',
@@ -72,49 +69,13 @@ export class DockerApi implements ICredentialType {
 			name: 'port',
 			type: 'number',
 			default: 2375,
+			required: true,
 			displayOptions: {
 				show: {
 					connectionMode: ['tcp', 'tls'],
 				},
 			},
-		},
-		{
-			displayName: 'Username',
-			name: 'username',
-			type: 'string',
-			default: '',
-			displayOptions: {
-				show: {
-					connectionMode: ['ssh'],
-				},
-			},
-			placeholder: 'root',
-		},
-		{
-			displayName: 'SSH Port',
-			name: 'sshPort',
-			type: 'number',
-			default: 22,
-			displayOptions: {
-				show: {
-					connectionMode: ['ssh'],
-				},
-			},
-		},
-		{
-			displayName: 'Private Key',
-			name: 'privateKey',
-			type: 'string',
-			default: '',
-			typeOptions: {
-				password: true,
-				rows: 4,
-			},
-			displayOptions: {
-				show: {
-					connectionMode: ['ssh'],
-				},
-			},
+			description: 'Use 2375 for plain TCP or 2376 for TLS by default',
 		},
 		{
 			displayName: 'Passphrase',
@@ -123,10 +84,11 @@ export class DockerApi implements ICredentialType {
 			default: '',
 			typeOptions: {
 				password: true,
+				rows: 4,
 			},
 			displayOptions: {
 				show: {
-					connectionMode: ['ssh', 'tls'],
+					connectionMode: ['tls'],
 				},
 			},
 		},
@@ -137,6 +99,7 @@ export class DockerApi implements ICredentialType {
 			default: '',
 			typeOptions: {
 				password: true,
+				rows: 4,
 			},
 			displayOptions: {
 				show: {
@@ -151,6 +114,7 @@ export class DockerApi implements ICredentialType {
 			default: '',
 			typeOptions: {
 				password: true,
+				rows: 4,
 			},
 			displayOptions: {
 				show: {
@@ -165,6 +129,7 @@ export class DockerApi implements ICredentialType {
 			default: '',
 			typeOptions: {
 				password: true,
+				rows: 4,
 			},
 			displayOptions: {
 				show: {
