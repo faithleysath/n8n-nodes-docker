@@ -1,0 +1,166 @@
+{
+  "name": "Docker Build and Deploy",
+  "nodes": [
+    {
+      "parameters": {},
+      "id": "manual-trigger",
+      "name": "Manual Trigger",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [-760, 120]
+    },
+    {
+      "parameters": {
+        "filePath": "/absolute/path/to/docker-context.tar"
+      },
+      "id": "read-binary-file",
+      "name": "Read Build Context",
+      "type": "n8n-nodes-base.readBinaryFile",
+      "typeVersion": 1,
+      "position": [-500, 120]
+    },
+    {
+      "parameters": {
+        "operation": "build",
+        "binaryPropertyName": "data",
+        "dockerfilePath": "Dockerfile",
+        "buildTags": {
+          "values": [
+            {
+              "value": "demo/app:latest"
+            }
+          ]
+        },
+        "buildArgs": {
+          "values": []
+        },
+        "buildLabels": {
+          "values": []
+        },
+        "builderVersion": "2",
+        "buildPull": true,
+        "buildNoCache": false,
+        "buildQuiet": false,
+        "buildRemoveIntermediateContainers": true,
+        "buildAlwaysRemoveIntermediateContainers": false,
+        "buildNetworkMode": "",
+        "targetStage": "",
+        "platform": "",
+        "timeoutSeconds": 900,
+        "outputMode": "aggregate"
+      },
+      "id": "docker-build",
+      "name": "Docker Build",
+      "type": "@faithleysath/n8n-nodes-docker.dockerBuild",
+      "typeVersion": 1,
+      "position": [-220, 120],
+      "credentials": {
+        "dockerApi": {
+          "name": "Docker Deploy"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "resource": "container",
+        "operation": "create",
+        "createName": "demo-app",
+        "createImage": "demo/app:latest",
+        "createCommandArgs": {
+          "values": []
+        },
+        "createEnv": {
+          "values": []
+        },
+        "createLabels": {
+          "values": []
+        },
+        "createPorts": {
+          "values": []
+        },
+        "createVolumeMounts": {
+          "values": []
+        },
+        "createRestartPolicyName": "unless-stopped",
+        "createNetworkMode": ""
+      },
+      "id": "create-container",
+      "name": "Create Container",
+      "type": "@faithleysath/n8n-nodes-docker.docker",
+      "typeVersion": 1,
+      "position": [80, 40],
+      "credentials": {
+        "dockerApi": {
+          "name": "Docker Deploy"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "resource": "container",
+        "operation": "start",
+        "containerId": "demo-app"
+      },
+      "id": "start-container",
+      "name": "Start Container",
+      "type": "@faithleysath/n8n-nodes-docker.docker",
+      "typeVersion": 1,
+      "position": [360, 40],
+      "credentials": {
+        "dockerApi": {
+          "name": "Docker Deploy"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Manual Trigger": {
+      "main": [
+        [
+          {
+            "node": "Read Build Context",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read Build Context": {
+      "main": [
+        [
+          {
+            "node": "Docker Build",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Docker Build": {
+      "main": [
+        [
+          {
+            "node": "Create Container",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Create Container": {
+      "main": [
+        [
+          {
+            "node": "Start Container",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "pinData": {},
+  "active": false,
+  "settings": {},
+  "versionId": "docker-build-and-deploy-v1"
+}

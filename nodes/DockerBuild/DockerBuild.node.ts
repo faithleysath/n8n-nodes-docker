@@ -1,10 +1,7 @@
 /* eslint-disable @n8n/community-nodes/node-usable-as-tool */
 import type {
-	ICredentialDataDecryptedObject,
-	ICredentialTestFunctions,
 	IDataObject,
 	IExecuteFunctions,
-	INodeCredentialTestResult,
 	INodeExecutionData,
 	INodeProperties,
 	INodeType,
@@ -38,6 +35,7 @@ import {
 	normalizePositiveInteger,
 	trimToUndefined,
 } from '../Docker/utils/execution';
+import { validateDockerApiConnection } from '../Docker/utils/credentialTest';
 
 type DockerBuildOperation = 'build' | 'import';
 interface DockerBuildOperationScope {
@@ -220,13 +218,13 @@ export class DockerBuild implements INodeType {
 				testedBy: 'validateDockerApiConnection',
 			},
 		],
-		properties: [
-			{
-				displayName:
-					'Phase 5 adds a dedicated Docker Build node for long-running tar-based image build and import workflows. It keeps binary inputs, streamed progress, and timeout-aware execution isolated from the AI-usable Docker node.',
-				name: 'phaseFiveNotice',
-				type: 'notice',
-				default: '',
+			properties: [
+				{
+					displayName:
+						'Phase 6 keeps Docker Build dedicated to long-running tar-based image build and import workflows, including streamed progress, timeout-aware execution, cancellation, and SSH-backed daemon connections.',
+					name: 'phaseFiveNotice',
+					type: 'notice',
+					default: '',
 			},
 			{
 				displayName: 'Operation',
@@ -530,32 +528,7 @@ export class DockerBuild implements INodeType {
 
 	methods = {
 		credentialTest: {
-			async validateDockerApiConnection(
-				this: ICredentialTestFunctions,
-				credential: { data?: ICredentialDataDecryptedObject },
-			): Promise<INodeCredentialTestResult> {
-				try {
-					const client = new DockerApiClient((credential.data ?? {}) as DockerCredentials);
-					const pingResult = await client.ping();
-
-					if (!pingResult.ok) {
-						return {
-							message: 'Docker daemon did not return an OK ping response.',
-							status: 'Error',
-						};
-					}
-
-					return {
-						message: `Connected to Docker daemon${pingResult.apiVersion ? ` (API ${pingResult.apiVersion})` : ''}.`,
-						status: 'OK',
-					};
-				} catch (error) {
-					return {
-						message: error instanceof Error ? error.message : 'Failed to connect to Docker daemon.',
-						status: 'Error',
-					};
-				}
-			},
+			validateDockerApiConnection,
 		},
 	};
 
@@ -565,10 +538,11 @@ export class DockerBuild implements INodeType {
 
 		for (let itemIndex = 0; itemIndex < inputItems.length; itemIndex += 1) {
 			const operation = this.getNodeParameter('operation', itemIndex) as DockerBuildOperation;
+			let client: DockerApiClient | undefined;
 
 			try {
 				const credentials = await this.getCredentials<DockerCredentials>('dockerApi', itemIndex);
-				const client = new DockerApiClient(credentials);
+				client = new DockerApiClient(credentials);
 				const node = getNodeGetter(this);
 				assertWritableAccess(node, client.accessMode, operation, itemIndex);
 				const binaryPropertyName = assertNonEmptyValue(
@@ -615,10 +589,10 @@ export class DockerBuild implements INodeType {
 							itemIndex,
 							'2',
 						) as '1' | '2';
-						const streamResult = await collectTimedDockerStream(
-							operationScope,
-							async (abortSignal) =>
-								await client.buildImage(
+							const streamResult = await collectTimedDockerStream(
+								operationScope,
+								async (abortSignal) =>
+									await client!.buildImage(
 									{
 										body: binaryBuffer,
 										buildArgs: getStringRecord(this, 'buildArgs', itemIndex),
@@ -696,10 +670,10 @@ export class DockerBuild implements INodeType {
 					const importMessage = trimToUndefined(
 						this.getNodeParameter('importMessage', itemIndex, '') as string,
 					);
-					const streamResult = await collectTimedDockerStream(
-						operationScope,
-						async (abortSignal) =>
-							await client.importImage(
+						const streamResult = await collectTimedDockerStream(
+							operationScope,
+							async (abortSignal) =>
+								await client!.importImage(
 								{
 									body: binaryBuffer,
 									changes,
@@ -721,12 +695,12 @@ export class DockerBuild implements INodeType {
 					const importReference = resolveImportReference(repository, tag);
 					let image: IDataObject | null = null;
 
-					if (importReference !== undefined) {
-						try {
-							image = (await operationScope.run(
-								async (abortSignal) =>
-									(await client.inspectImage(importReference, abortSignal)) as IDataObject,
-							)) as IDataObject;
+						if (importReference !== undefined) {
+							try {
+								image = (await operationScope.run(
+									async (abortSignal) =>
+										(await client!.inspectImage(importReference, abortSignal)) as IDataObject,
+								)) as IDataObject;
 						} catch {
 							operationScope.throwIfAborted();
 							image = null;
@@ -780,6 +754,8 @@ export class DockerBuild implements INodeType {
 				}
 
 				throw new NodeOperationError(this.getNode(), error as Error, { itemIndex });
+			} finally {
+				await client?.close();
 			}
 		}
 

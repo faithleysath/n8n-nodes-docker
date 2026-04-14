@@ -2,10 +2,7 @@
 import { posix } from 'node:path';
 
 import type {
-	ICredentialDataDecryptedObject,
-	ICredentialTestFunctions,
 	IExecuteFunctions,
-	INodeCredentialTestResult,
 	INodeExecutionData,
 	INodeType,
 	INodeTypeDescription,
@@ -36,6 +33,7 @@ import {
 	decodeContainerArchiveStatHeader,
 	extractSingleFileFromTarBuffer,
 } from '../Docker/utils/tar';
+import { validateDockerApiConnection } from '../Docker/utils/credentialTest';
 
 type DockerFilesResource = 'container' | 'image';
 type DockerFilesOperation = 'copyFrom' | 'copyTo' | 'export' | 'load' | 'save';
@@ -89,7 +87,7 @@ export class DockerFiles implements INodeType {
 		properties: [
 			{
 				displayName:
-					'Docker Files handles binary and tar workflows for both container file archives and image save/load. It is intentionally separate from the AI-usable Docker node so binary data and tar streams stay isolated.',
+					'Docker Files handles binary and tar workflows for container archives and image save/load. It stays separate from the AI-usable Docker node so binary streams, long archive transfers, and SSH-backed file operations remain isolated.',
 				name: 'dockerFilesNotice',
 				type: 'notice',
 				default: '',
@@ -319,32 +317,7 @@ export class DockerFiles implements INodeType {
 
 	methods = {
 		credentialTest: {
-			async validateDockerApiConnection(
-				this: ICredentialTestFunctions,
-				credential: { data?: ICredentialDataDecryptedObject },
-			): Promise<INodeCredentialTestResult> {
-				try {
-					const client = new DockerApiClient((credential.data ?? {}) as DockerCredentials);
-					const pingResult = await client.ping();
-
-					if (!pingResult.ok) {
-						return {
-							message: 'Docker daemon did not return an OK ping response.',
-							status: 'Error',
-						};
-					}
-
-					return {
-						message: `Connected to Docker daemon${pingResult.apiVersion ? ` (API ${pingResult.apiVersion})` : ''}.`,
-						status: 'OK',
-					};
-				} catch (error) {
-					return {
-						message: error instanceof Error ? error.message : 'Failed to connect to Docker daemon.',
-						status: 'Error',
-					};
-				}
-			},
+			validateDockerApiConnection,
 		},
 	};
 
@@ -355,10 +328,11 @@ export class DockerFiles implements INodeType {
 		for (let itemIndex = 0; itemIndex < inputItems.length; itemIndex += 1) {
 			const resource = this.getNodeParameter('resource', itemIndex) as DockerFilesResource;
 			const operation = this.getNodeParameter('operation', itemIndex) as DockerFilesOperation;
+			let client: DockerApiClient | undefined;
 
 			try {
 				const credentials = await this.getCredentials<DockerCredentials>('dockerApi', itemIndex);
-				const client = new DockerApiClient(credentials);
+				client = new DockerApiClient(credentials);
 				const node = getNodeGetter(this);
 				assertWritableAccess(node, client.accessMode, operation, itemIndex);
 				if (resource === 'container' && operation === 'copyTo') {
@@ -692,9 +666,11 @@ export class DockerFiles implements INodeType {
 					throw createNodeApiError(() => this.getNode(), error, itemIndex);
 				}
 
-				throw new NodeOperationError(this.getNode(), error as Error, { itemIndex });
+					throw new NodeOperationError(this.getNode(), error as Error, { itemIndex });
+				} finally {
+					await client?.close();
+				}
 			}
-		}
 
 		return [returnData];
 	}

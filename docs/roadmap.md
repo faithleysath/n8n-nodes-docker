@@ -303,6 +303,7 @@
 - 文档完备
 - 示例工作流完备
 - 集成测试覆盖主能力面
+- 可选 SSH 集成测试具备本地自举路径
 - 版本迁移策略明确
 - 对外 README、CHANGELOG、发布说明成熟
 
@@ -332,7 +333,7 @@
 
 仓库当前处于：
 
-- Phase 5
+- Phase 6
 
 也就是：
 
@@ -341,5 +342,9 @@
 - `Docker Files` 已覆盖容器文件导入导出，以及 `image save/load`
 - `Docker Trigger` 已覆盖 Docker event 触发、回放、去重与重连
 - `Docker Build` 已覆盖 tar-based `build` 与 `import`
-- `Unix Socket`、`TCP`、`TLS` 已可用
-- `SSH` 与完整 `Docker Registry` 生命周期仍在后续阶段
+- `Unix Socket`、`TCP`、`TLS`、`SSH` 已可用
+- README、CHANGELOG、安全建议、发布说明和样例工作流已补齐到 `1.0.0` 核心发布面
+- 已提供普通 Docker daemon 可选集成测试，以及本地 SSH helper 集成测试路径
+- `registry` 深度能力、Swarm、Compose-like 抽象和智能补全仍在后续阶段
+
+也就是说，主线 roadmap 已经在 `1.0.0` 收口；后续只剩可选增强项，而不是主线未完工项。

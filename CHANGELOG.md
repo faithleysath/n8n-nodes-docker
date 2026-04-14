@@ -1,3 +1,12 @@
+## 1.0.0 - 2026-04-14
+
+- Added SSH transport support for Docker-over-remote-Unix-socket workflows with key-based authentication, SSH port and remote socket path settings, private key validation, and shared credential testing across all four nodes
+- Added explicit Docker client shutdown handling so action nodes, build/import workflows, and Docker Trigger close SSH-backed streams and sessions cleanly during normal completion, cancellation, and manual shutdown
+- Fixed SSH connection startup cancellation so closing a node or aborting a request no longer waits for the SSH ready timeout before unwinding
+- Added Phase 6 regression coverage for SSH transport defaults and overrides, SSH validation errors, SSH connection retries, SSH-backed long-lived stream teardown, and node-level client cleanup
+- Added self-hosted security guidance plus example workflows for SSH inventory checks, build-and-deploy pipelines, and trigger-driven log capture
+- Updated README, roadmap, architecture docs, security/publishing docs, operations matrix, and package metadata for the `1.0.0` Phase 6 core release surface
+
 ## 0.6.2 - 2026-04-14
 
 - Fixed long-lived Docker event and log streams so they no longer inherit the default request idle timeout, leaving trigger reconnects and follow durations under node-level control

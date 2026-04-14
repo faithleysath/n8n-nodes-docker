@@ -2,173 +2,124 @@
 
 `n8n-nodes-docker` 是一个面向 **n8n 自托管实例** 的 Docker community node 包。
 
-当前已经完成：
+当前版本：`1.0.0`
 
-- 独立 npm 包骨架
-- `Docker` 主节点的 Phase 4 JSON / 文本资源能力
-- `Docker Files` 节点的二进制 / tar 文件能力，包括容器文件归档和 image save/load
-- `Docker Trigger` 节点的 Docker events 触发能力
-- `Docker Build` 节点的 tar-based image build 与 image import 能力
-- `Docker API` 凭证的可运行连接模型
-- 针对 transport、exec policy、tar/build 工具和节点边界的自动化测试
-- 从第一期到完全体的分阶段交付文档
+这个版本对应路线图中的 **Phase 6 核心版**：
 
-这个仓库还**没有**完成完整 Docker 产品矩阵。当前版本已经落地了容器、镜像、网络、卷、daemon metadata、日志/事件流增强、独立的 Docker Trigger、文件导入导出，以及第一版 Docker Build；后续 registry、SSH 和更高阶产品化能力仍按路线图继续推进。
+- `Docker` 主节点覆盖 `container`、`image`、`network`、`volume`、`system`
+- `Docker Files` 覆盖容器文件导入导出和 `image save/load`
+- `Docker Trigger` 覆盖 Docker event 触发、游标回放、去重和重连
+- `Docker Build` 覆盖 tar-based `build` 与 `import`
+- `Unix Socket`、`TCP`、`TLS`、`SSH` 四种连接模式可用
+- 已有自动化测试覆盖 transport、节点执行、长流、tar/build 工具、SSH 生命周期，以及可选的真实 Docker daemon / 本地 SSH 集成路径
 
-## 目标
+这个包的定位是 **Docker automation toolkit for n8n**，重点是把 Docker 的常用资源管理、文件流、事件流和构建链路系统化接到工作流里。`registry`、`Swarm`、`Compose-like` 抽象和智能补全仍留在后续版本，不属于 `1.0.0` 的公开能力面。
 
-这个包的目标不是只做几个容器启停按钮，而是把 Docker 能力系统化接入 n8n，包括：
-
-- 镜像管理
-- 容器生命周期管理
-- 容器内命令执行
-- 容器文件导入导出
-- 网络与数据卷管理
-- Docker daemon / system 能力
-- Docker 事件触发
-- 后期的构建、导入导出、注册表与更高级能力
-
-## 规划中的节点族
-
-当前仓库已经落下四个节点，完整形态预计包含：
+## 节点族
 
 - `Docker`
-  负责容器、镜像、网络、卷、system 等资源的 CRUD 与运维操作
+  负责容器、镜像、网络、卷和 daemon metadata 的 JSON / 文本型操作。
+  这是唯一保留为 AI-usable 的节点。
 - `Docker Files`
-  负责容器文件导入导出、image save/load、tar/binary 转换，以及需要 binary 输出的文件系统动作
+  负责 `copyTo`、`copyFrom`、`export`、`image save`、`image load`。
+  这个节点专门隔离 binary / tar 工作流。
 - `Docker Trigger`
-  监听或轮询 Docker events，把 daemon 事件转成工作流触发源
+  负责 Docker event 监听、回放、去重和重连。
 - `Docker Build`
-  单独承接 build context、BuildKit、image import、长时间运行任务
-- `Docker Registry`
-  后续如果需要，再把 registry auth、manifest、tag 生命周期独立出来
+  负责 tar-based image build / import，以及长时间运行的流式构建输出。
 
-## 连接方式规划
+## 当前能力面
 
-`Docker API` 凭证已经预留了这些连接模式：
+已实现的资源与操作：
 
-- `Unix Socket`
-- `TCP`
-- `TLS`
+- `container`: `list`, `inspect`, `create`, `update`, `start`, `stop`, `restart`, `remove`, `logs`, `stats`, `top`, `wait`, `exec`
+- `image`: `list`, `inspect`, `pull`, `tag`, `remove`, `history`, `prune`, `save`, `load`, `build`, `import`
+- `network`: `list`, `inspect`, `create`, `connect`, `disconnect`, `delete`, `prune`
+- `volume`: `list`, `inspect`, `create`, `delete`, `prune`
+- `system`: `ping`, `info`, `version`, `df`, `events`
 
-当前版本已实现前三种；`SSH` 仍在规划中。
+流式与长任务增强：
 
-## 安全边界
+- `container:logs` 支持 `snapshot` / `followForDuration`
+- `system:events` 支持 `bounded` / `resumeFromCursor`
+- `Docker Trigger` 支持 replay、dedupe、reconnect
+- `Docker Build` 支持 streamed build/import output、超时、取消和 continue-on-fail
 
-Docker daemon 的写权限基本等价于宿主机高权限控制，所以这个包默认按“高风险基础设施节点”来设计。
-
-建议默认搭配这些约束一起使用：
-
-- 优先走 `Unix Socket` 或 `SSH`
-- 如果走远程 TCP，优先要求 TLS
-- 在生产环境优先通过 [docker-socket-proxy](https://github.com/Tecnativa/docker-socket-proxy) 缩小 API 面
-- 将危险操作与只读操作在参数层和执行层都分开
-
-## 开发状态
-
-当前版本：`0.6.0`
-
-当前实现状态：
-
-- 已实现 `container:list`
-- 已实现 `container:create`
-- 已实现 `container:exec`
-- 已实现 `container:inspect`
-- 已实现 `container:start`
-- 已实现 `container:stop`
-- 已实现 `container:restart`
-- 已实现 `container:remove`
-- 已实现 `container:logs`
-- 已实现 `container:stats`
-- 已实现 `container:top`
-- 已实现 `container:update`
-- 已实现 `container:wait`
-- 已实现 `container:logs` 的 snapshot / followForDuration 双模式
-- 已实现 `image:list`
-- 已实现 `image:inspect`
-- 已实现 `image:pull`
-- 已实现 `image:tag`
-- 已实现 `image:remove`
-- 已实现 `image:history`
-- 已实现 `image:prune`
-- 已实现 `network:list`
-- 已实现 `network:inspect`
-- 已实现 `network:create`
-- 已实现 `network:connect`
-- 已实现 `network:disconnect`
-- 已实现 `network:delete`
-- 已实现 `network:prune`
-- 已实现 `volume:list`
-- 已实现 `volume:inspect`
-- 已实现 `volume:create`
-- 已实现 `volume:delete`
-- 已实现 `volume:prune`
-- 已实现 `system:df`
-- 已实现 `system:events`
-- 已实现 `system:events` 的 bounded / resumeFromCursor 双模式
-- 已实现 `system:ping`
-- 已实现 `system:info`
-- 已实现 `system:version`
-- 已实现 `Docker Trigger`
-- 已实现 `Docker Files:copyTo`
-- 已实现 `Docker Files:copyFrom`
-- 已实现 `Docker Files:export`
-- 已实现 `Docker Files:image:save`
-- 已实现 `Docker Files:image:load`
-- 已实现 `Docker Build:build`
-- 已实现 `Docker Build:import`
-- 已支持 `Unix Socket`、`TCP`、`TLS`
-- 已实现 `readOnly` / `fullControl` 危险操作门禁
-- 已加入 transport、exec policy、tar 工具、节点元数据与可选集成测试
-- `SSH` / `registry` 仍未实现
-
-## 当前节点范围
-
-当前包暴露四个节点：
-
-- `Docker`
-  资源范围是 `Container`、`Image`、`Network`、`Volume` 和 `System`
-  这是 AI 可调用节点，专门保留给 JSON / 文本型输入输出
-- `Docker Files`
-  负责 `copyTo`、`copyFrom`、`export`、`image save`、`image load`
-  这个节点不作为 AI 工具，用来隔离 binary 与 tar 工作流
-- `Docker Trigger`
-  负责监听 Docker events，带游标回放、去重和重连
-  这个节点不作为 AI 工具，用来隔离 trigger 生命周期和长连接状态
-- `Docker Build`
-  负责 tar-based `build` 与 `import`
-  这个节点不作为 AI 工具，用来隔离 binary 输入、流式进度输出和长时间运行任务
-
-这版是典型的 **programmatic-style node**，不是 declarative-style。原因是 Docker 的 Unix socket 连接、API version 协商、exec / logs raw-stream 解复用、archive/tar 处理、以及写操作门禁都不适合只靠 declarative routing 来表达。
-
-## 凭证与连接说明
+## 连接方式
 
 `Docker API` 凭证当前支持：
 
 - `Unix Socket`
 - `TCP`
 - `TLS`
+- `SSH`
 
-说明：
+SSH 模式当前约束：
 
-- `API Version` 默认为 `auto`，会在首次请求时自动协商
-- `Access Mode = Read Only` 时，只允许 `container:list/inspect/logs/top/stats/wait`、`image:list/inspect/history`、`network:list/inspect`、`volume:list/inspect`、`system:df/events/ping/info/version`
-- `Access Mode = Full Control` 才允许 `create`、`update`、`exec`、`start`、`stop`、`restart`、`remove`、`pull`、`tag`、网络和卷变更，以及 `Docker Files` 的 `copyTo` / `copyFrom` / `export` / `image save` / `image load` 和 `Docker Build` 的 `build` / `import`
-- 由于 n8n 的静态 credential request 模型不适合 Docker Unix socket，这个版本改用 node-level credential test 来校验 `Unix Socket`、`TCP`、`TLS` 连接，而不是提供一个误导性的“假测试”
+- 只支持 **私钥认证**
+- 目标是远端 **Unix socket**，默认路径 `/var/run/docker.sock`
+- 支持自定义 `SSH Port` 和 `Remote Socket Path`
+- `passphrase` 字段会同时用于 TLS key 和加密 SSH 私钥
+
+## 安全边界
+
+Docker daemon 的写权限基本等价于宿主机高权限控制，所以这个包默认按“高风险基础设施节点”来设计。
+
+建议默认约束：
+
+- 本地优先用 `Unix Socket`
+- 远程优先用 `SSH` 或 `TLS`
+- 如果必须暴露远程 TCP，优先要求 TLS
+- 生产环境优先通过 [docker-socket-proxy](https://github.com/Tecnativa/docker-socket-proxy) 缩小 API 面
+- 只读场景优先使用 `Access Mode = Read Only`
+
+更完整的生产建议见 [自托管安全建议](./docs/self-hosted-security.md)。
+
+## 示例工作流
+
+仓库内置了 3 个样例工作流：
+
+- [SSH 健康检查与资产盘点](./examples/workflows/docker-ssh-health-check-and-inventory.json)
+- [Build 并部署容器](./examples/workflows/docker-build-and-deploy.json)
+- [事件触发后抓取日志](./examples/workflows/docker-trigger-log-capture.json)
+
+导入前通常需要你自己替换：
+
+- 社区节点 credential 名称
+- `Read Binary File` 的本地路径
+- 目标镜像名、容器名、网络和 volume 参数
+
+## 凭证与执行策略
+
+`Docker API` 凭证默认行为：
+
+- `API Version = auto` 时会自动协商 Docker Engine API version
+- `Access Mode = Read Only` 仅允许只读资源操作和事件/日志读取
+- `Access Mode = Full Control` 才允许 create/update/remove/pull/tag/build/import/file copy 等写操作
+- 由于 n8n 的静态 credential test 不适合 Unix socket 和 SSH stream-local forwarding，这个包统一使用 **node-level credential test**
 
 ## 文档导航
 
 - [架构设计](./docs/architecture.md)
 - [阶段路线图](./docs/roadmap.md)
 - [能力矩阵](./docs/operations-matrix.md)
+- [自托管安全建议](./docs/self-hosted-security.md)
 - [npm 发布指南](./docs/publishing.md)
 
 ## 本地开发
+
+安装依赖并跑基础检查：
 
 ```bash
 pnpm install
 pnpm lint
 pnpm test
+```
+
+如果你要补跑真实 Docker daemon 集成：
+
+```bash
+RUN_DOCKER_INTEGRATION=1 node --test tests/docker.integration.test.cjs
 ```
 
 如需把这个包接到本地 n8n 做联调：
@@ -177,11 +128,51 @@ pnpm test
 pnpm dev
 ```
 
-如果只想单独构建产物：
+只构建产物：
 
 ```bash
 pnpm build
 ```
+
+如果你想在本机临时拉起一个 SSH 测试目标并跑可选的 SSH 集成测试：
+
+```bash
+pnpm test:ssh:local
+```
+
+这个脚本会：
+
+- 用当前用户启动一个只监听 `127.0.0.1` 的临时 `sshd`
+- 生成一次性密钥
+- 把本机 Docker Unix socket 通过 SSH stream-local forwarding 暴露给测试
+- 只覆盖 SSH 集成分支，不会顺带启用普通 Docker 集成分支
+
+如果你已经有现成的 SSH Docker 测试目标，也可以直接手动设置环境变量：
+
+```bash
+RUN_DOCKER_SSH_INTEGRATION=1 \
+DOCKER_SSH_HOST=127.0.0.1 \
+DOCKER_SSH_PORT=2222 \
+DOCKER_SSH_USERNAME=docker \
+DOCKER_SSH_PRIVATE_KEY_PATH=/path/to/id_rsa \
+DOCKER_SSH_REMOTE_SOCKET_PATH=/var/run/docker.sock \
+pnpm test
+```
+
+上面这条命令会执行基础测试套件并启用 SSH 集成分支；如果你希望 `tests/docker.integration.test.cjs` 里的普通 Docker 集成和 SSH 集成都不出现 skip，可以直接同时带上两个开关：
+
+```bash
+RUN_DOCKER_INTEGRATION=1 \
+RUN_DOCKER_SSH_INTEGRATION=1 \
+DOCKER_SSH_HOST=127.0.0.1 \
+DOCKER_SSH_PORT=2222 \
+DOCKER_SSH_USERNAME=docker \
+DOCKER_SSH_PRIVATE_KEY_PATH=/path/to/id_rsa \
+DOCKER_SSH_REMOTE_SOCKET_PATH=/var/run/docker.sock \
+node --test tests/docker.integration.test.cjs
+```
+
+默认测试不会要求本机存在 SSH Docker 测试目标。`pnpm test:ssh:local` 依赖本机存在 `sshd`、`ssh`、`ssh-keygen` 和可用的 Docker daemon，并要求 `DOCKER_SSH_USERNAME` 与当前本机用户一致。
 
 ## 仓库结构
 
@@ -192,42 +183,22 @@ n8n-nodes-docker/
 ├── docs/
 │   ├── architecture.md
 │   ├── operations-matrix.md
-│   └── roadmap.md
+│   ├── publishing.md
+│   ├── roadmap.md
+│   └── self-hosted-security.md
+├── examples/
+│   └── workflows/
 ├── nodes/
 │   ├── Docker/
-│   │   ├── Docker.node.ts
-│   │   ├── descriptions/
-│   │   ├── operations/
-│   │   ├── transport/
-│   │   ├── utils/
-│   │   ├── docker.svg
-│   │   └── docker.dark.svg
 │   ├── DockerBuild/
-│   │   ├── DockerBuild.node.ts
-│   │   └── DockerBuild.node.json
 │   ├── DockerFiles/
-│   │   ├── DockerFiles.node.ts
-│   │   └── DockerFiles.node.json
 │   └── DockerTrigger/
-│       ├── DockerTrigger.node.ts
-│       └── DockerTrigger.node.json
+├── tests/
 └── package.json
 ```
 
-## 发布前需要你确认的内容
+## 发布提示
 
-发布前建议确认这些字段仍然准确：
-
-- `package.json > homepage`
-- `package.json > repository.url`
-
-如果后续迁移组织、仓库名或 npm scope，记得同步更新这些元数据。
-
-## 公开发布提示
-
-如果你准备把这个包公开发布到 npm，请先注意：
-
-- 当前公开包名使用 `@faithleysath/n8n-nodes-docker`
-- 发布前仍需要先在这台机器上完成 `npm login`
-
-第一次发布前，按 [npm 发布指南](./docs/publishing.md) 走一遍会最稳。
+- npm 包名当前为 `@faithleysath/n8n-nodes-docker`
+- 发布前确认 `package.json > homepage` 和 `package.json > repository.url`
+- 如果要在本机手动校验 npm 身份或执行手工发布，再运行 `npm login` / `npm whoami`

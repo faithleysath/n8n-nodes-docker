@@ -2,6 +2,13 @@
 
 这张表用来回答一个最实际的问题：每一阶段到底会落哪些能力。
 
+当前发布基线：`1.0.0`，对应 Phase 6 核心版。
+
+说明：
+
+- 这张矩阵描述的是各阶段的主线承诺
+- 标记为 `Optional` 的项表示可以在该阶段内部试验性落地，但不等于当期公开稳定承诺
+
 ## 节点矩阵
 
 | 节点 | Phase 1 | Phase 2 | Phase 3 | Phase 4 | Phase 5 | Phase 6 |
@@ -114,3 +121,9 @@
 | 0.5.x | Phase 4 | Docker Trigger 与高级流处理 |
 | 0.6.x | Phase 5 | Docker Build 与 image import/export |
 | 1.0.0 | Phase 6 | 完整产品形态 |
+
+## Phase 6 发布面补充
+
+- 已补齐 README、CHANGELOG、发布指南、安全建议和样例工作流
+- 已提供基础测试、真实 Docker daemon 可选集成测试和本地 SSH helper 集成测试
+- `registry` 深度能力、Swarm、Compose-like 抽象和智能补全仍不在 `1.0.0` 公开能力面内

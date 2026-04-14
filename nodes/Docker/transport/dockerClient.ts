@@ -1,13 +1,16 @@
 import { access } from 'node:fs/promises';
 import type {
+	Agent as HttpAgentType,
 	IncomingHttpHeaders,
 	IncomingMessage,
 	RequestOptions as HttpRequestOptions,
 } from 'node:http';
-import { request as httpRequest } from 'node:http';
+import { Agent as HttpAgent, request as httpRequest } from 'node:http';
 import type { RequestOptions as HttpsRequestOptions } from 'node:https';
 import { request as httpsRequest } from 'node:https';
 import { URLSearchParams } from 'node:url';
+import type { Channel, ConnectConfig } from 'ssh2';
+import { Client as SshClient, utils as ssh2Utils } from 'ssh2';
 
 export type DockerConnectionMode = 'unixSocket' | 'tcp' | 'tls' | 'ssh';
 export type DockerAccessMode = 'readOnly' | 'fullControl';
@@ -27,7 +30,11 @@ export interface DockerCredentials {
 	key?: string;
 	passphrase?: string;
 	port?: number;
+	privateKey?: string;
+	remoteSocketPath?: string;
 	socketPath?: string;
+	sshPort?: number;
+	username?: string;
 }
 
 export interface DockerRegistryAuthConfig {
@@ -101,6 +108,22 @@ export interface DockerExecInspectResponse extends DockerJson {
 	Running?: boolean;
 }
 
+interface DockerClientOptions {
+	createSshClient?: () => SshClient;
+	timeoutMs?: number;
+}
+
+interface SshHttpChannel extends Channel {
+	__n8nSocketCompatApplied?: boolean;
+	__n8nSocketTimeoutId?: NodeJS.Timeout;
+	__n8nSocketTimeoutMs?: number;
+	ref?(): SshHttpChannel;
+	setKeepAlive?(enable?: boolean, initialDelay?: number): SshHttpChannel;
+	setNoDelay?(noDelay?: boolean): SshHttpChannel;
+	setTimeout?(timeout?: number, callback?: () => void): SshHttpChannel;
+	unref?(): SshHttpChannel;
+}
+
 export class DockerRequestError extends Error {
 	bodyText?: string;
 	details?: unknown;
@@ -140,6 +163,14 @@ function trimToUndefined(value: string | undefined): string | undefined {
 
 function getDefaultPort(isTls: boolean): number {
 	return isTls ? 2376 : 2375;
+}
+
+function getDefaultSshPort(): number {
+	return 22;
+}
+
+function createAbortError(): Error {
+	return new Error('The operation was aborted.');
 }
 
 function resolveConnectionPort(value: number | undefined, fallback: number): number {
@@ -236,19 +267,65 @@ export function encodeDockerRegistryConfig(
 export class DockerApiClient {
 	private readonly credentials: DockerCredentials;
 
+	private readonly createSshClient: () => SshClient;
+
 	private readonly timeoutMs: number;
+
+	private readonly activeRequestClosers = new Set<() => void>();
 
 	private negotiatedApiVersion?: Promise<string>;
 
+	private sshClient?: SshClient;
+
+	private sshClientReady = false;
+
+	private sshConnection?: Promise<SshClient>;
+
 	private validatedConnection?: Promise<void>;
 
-	constructor(credentials: DockerCredentials, options?: { timeoutMs?: number }) {
+	constructor(credentials: DockerCredentials, options?: DockerClientOptions) {
 		this.credentials = credentials;
+		this.createSshClient = options?.createSshClient ?? (() => new SshClient());
 		this.timeoutMs = options?.timeoutMs ?? 30_000;
 	}
 
 	get accessMode(): DockerAccessMode {
 		return this.credentials.accessMode ?? 'readOnly';
+	}
+
+	async close(): Promise<void> {
+		for (const closeRequest of Array.from(this.activeRequestClosers)) {
+			try {
+				closeRequest();
+			} catch {
+				// Ignore close-time cleanup failures.
+			}
+		}
+
+		this.activeRequestClosers.clear();
+		this.negotiatedApiVersion = undefined;
+		this.validatedConnection = undefined;
+
+		const sshConnection = this.sshConnection;
+		const sshClient = this.sshClient;
+		const sshClientReady = this.sshClientReady;
+
+		this.sshConnection = undefined;
+		this.sshClient = undefined;
+		this.sshClientReady = false;
+
+		if (sshClient !== undefined) {
+			await this.closeSshClient(sshClient, { force: !sshClientReady });
+		}
+
+		const resolvedSshClient =
+			sshConnection === undefined ? undefined : await sshConnection.catch(() => undefined);
+
+		if (resolvedSshClient === undefined || resolvedSshClient === sshClient) {
+			return;
+		}
+
+		await this.closeSshClient(resolvedSshClient);
 	}
 
 	async ping(abortSignal?: AbortSignal): Promise<DockerPingResponse> {
@@ -1073,6 +1150,16 @@ export class DockerApiClient {
 		const requestFn = this.credentials.connectionMode === 'tls' ? httpsRequest : httpRequest;
 
 		return await new Promise<DockerStreamResponse>((resolve, reject) => {
+			const requestAgent = requestOptions.agent;
+			const closeAgent = () => {
+				if (requestAgent instanceof HttpAgent) {
+					requestAgent.destroy();
+				}
+			};
+			let closeStream = () => {
+				request.once('error', () => {});
+				request.destroy();
+			};
 			const request = requestFn(requestOptions, (response) => {
 				const statusCode = response.statusCode ?? 0;
 				const expectedStatusCodes = options.expectedStatusCodes;
@@ -1089,6 +1176,8 @@ export class DockerApiClient {
 					});
 
 					response.on('end', () => {
+						unregisterClose();
+						closeAgent();
 						const body = Buffer.concat(chunks);
 						const parsedBody = parseJsonIfPossible(body);
 						const bodyText =
@@ -1112,18 +1201,44 @@ export class DockerApiClient {
 					return;
 				}
 
+				const responseClose = () => {
+					unregisterClose();
+					closeAgent();
+					response.off('close', responseClose);
+					response.off('end', responseClose);
+					response.off('error', responseClose);
+				};
+
+				closeStream = () => {
+					response.once('error', () => {});
+					request.once('error', () => {});
+					response.destroy();
+					request.destroy();
+				};
+
 				resolve({
 					close() {
-						response.destroy();
-						request.destroy();
+						responseClose();
+						closeStream();
 					},
 					headers: response.headers,
 					statusCode,
 					stream: response,
 				});
+
+				response.on('close', responseClose);
+				response.on('end', responseClose);
+				response.on('error', responseClose);
+			});
+
+			const unregisterClose = this.registerActiveRequestCloser(() => {
+				closeAgent();
+				closeStream();
 			});
 
 			request.on('error', (error) => {
+				unregisterClose();
+				closeAgent();
 				reject(
 					new DockerRequestError(error.message, {
 						method,
@@ -1160,6 +1275,12 @@ export class DockerApiClient {
 		const requestFn = this.credentials.connectionMode === 'tls' ? httpsRequest : httpRequest;
 
 		return await new Promise<DockerRawResponse>((resolve, reject) => {
+			const requestAgent = requestOptions.agent;
+			const closeAgent = () => {
+				if (requestAgent instanceof HttpAgent) {
+					requestAgent.destroy();
+				}
+			};
 			const request = requestFn(requestOptions, (response) => {
 				const chunks: Buffer[] = [];
 
@@ -1168,6 +1289,8 @@ export class DockerApiClient {
 				});
 
 				response.on('end', () => {
+					unregisterClose();
+					closeAgent();
 					const body = Buffer.concat(chunks);
 					const statusCode = response.statusCode ?? 0;
 					const expectedStatusCodes = options.expectedStatusCodes;
@@ -1206,7 +1329,14 @@ export class DockerApiClient {
 				});
 			});
 
+			const unregisterClose = this.registerActiveRequestCloser(() => {
+				closeAgent();
+				request.destroy();
+			});
+
 			request.on('error', (error) => {
+				unregisterClose();
+				closeAgent();
 				reject(
 					new DockerRequestError(error.message, {
 						method,
@@ -1290,6 +1420,20 @@ export class DockerApiClient {
 			};
 		}
 
+		if (this.credentials.connectionMode === 'ssh') {
+			return {
+				agent: this.createSshHttpAgent(options.abortSignal),
+				headers: {
+					Host: trimToUndefined(this.credentials.host) ?? 'docker',
+					...headers,
+				},
+				host: trimToUndefined(this.credentials.host) ?? 'docker',
+				method,
+				path,
+				signal: options.abortSignal,
+			};
+		}
+
 		const hostname = trimToUndefined(this.credentials.host);
 		const isTls = this.credentials.connectionMode === 'tls';
 		const port = resolveConnectionPort(this.credentials.port, getDefaultPort(isTls));
@@ -1356,13 +1500,13 @@ export class DockerApiClient {
 						return;
 					}
 
-					case 'tcp':
-					case 'tls': {
-						const host = trimToUndefined(this.credentials.host);
+						case 'tcp':
+						case 'tls': {
+							const host = trimToUndefined(this.credentials.host);
 
-						if (host === undefined) {
-							throw new Error('Host is required for TCP and TLS modes.');
-						}
+							if (host === undefined) {
+								throw new Error('Host is required for TCP and TLS modes.');
+							}
 
 						if (
 							this.credentials.port !== undefined &&
@@ -1382,16 +1526,54 @@ export class DockerApiClient {
 							}
 						}
 
-						return;
-					}
+							return;
+						}
 
-					case 'ssh':
-						throw new Error(
-							'Connection mode SSH is planned for a later phase and is not supported in this release.',
-						);
+						case 'ssh': {
+							const host = trimToUndefined(this.credentials.host);
+							const username = trimToUndefined(this.credentials.username);
+							const privateKey = trimToUndefined(this.credentials.privateKey);
+							const remoteSocketPath = trimToUndefined(this.credentials.remoteSocketPath);
 
-					default:
-						throw new Error('Select a supported Docker connection mode.');
+							if (host === undefined) {
+								throw new Error('Host is required for SSH mode.');
+							}
+
+							if (username === undefined) {
+								throw new Error('Username is required for SSH mode.');
+							}
+
+							if (
+								this.credentials.sshPort !== undefined &&
+								(!Number.isInteger(this.credentials.sshPort) || this.credentials.sshPort <= 0)
+							) {
+								throw new Error('SSH Port must be a positive integer.');
+							}
+
+							if (privateKey === undefined) {
+								throw new Error('Private Key is required for SSH mode.');
+							}
+
+							const parsedPrivateKey = ssh2Utils.parseKey(
+								privateKey,
+								trimToUndefined(this.credentials.passphrase),
+							);
+
+							if (parsedPrivateKey instanceof Error) {
+								throw new Error(
+									`Private Key is not a valid SSH private key: ${parsedPrivateKey.message}`,
+								);
+							}
+
+							if (this.credentials.remoteSocketPath !== undefined && remoteSocketPath === undefined) {
+								throw new Error('Remote Socket Path is required for SSH mode.');
+							}
+
+							return;
+						}
+
+						default:
+							throw new Error('Select a supported Docker connection mode.');
 				}
 			} catch (error) {
 				this.validatedConnection = undefined;
@@ -1400,5 +1582,368 @@ export class DockerApiClient {
 		})();
 
 		return await this.validatedConnection;
+	}
+
+	private registerActiveRequestCloser(closeRequest: () => void): () => void {
+		this.activeRequestClosers.add(closeRequest);
+
+		return () => {
+			this.activeRequestClosers.delete(closeRequest);
+		};
+	}
+
+	private async closeSshClient(
+		sshClient: SshClient,
+		options?: { force?: boolean },
+	): Promise<void> {
+		const force = options?.force ?? false;
+
+		await new Promise<void>((resolve) => {
+			let settled = false;
+
+			const cleanup = () => {
+				clearTimeout(forceDestroyTimeout);
+				sshClient.off('close', onClose);
+				sshClient.off('error', onError);
+			};
+
+			const settle = () => {
+				if (settled) {
+					return;
+				}
+
+				settled = true;
+				cleanup();
+				resolve();
+			};
+
+			const onClose = () => {
+				settle();
+			};
+			const onError = () => {
+				settle();
+			};
+			const forceDestroyTimeout = setTimeout(() => {
+				try {
+					sshClient.destroy();
+				} catch {
+					// Ignore best-effort shutdown failures.
+				}
+
+				settle();
+			}, 500);
+
+			sshClient.on('close', onClose);
+			sshClient.on('error', onError);
+
+			try {
+				if (force) {
+					sshClient.destroy();
+				} else {
+					sshClient.end();
+				}
+			} catch {
+				try {
+					sshClient.destroy();
+				} catch {
+					// Ignore best-effort shutdown failures.
+				}
+
+				settle();
+			}
+		});
+	}
+
+	private resetSshConnectionState(expectedClient?: SshClient): void {
+		if (expectedClient !== undefined && this.sshClient !== expectedClient) {
+			return;
+		}
+
+		this.negotiatedApiVersion = undefined;
+		this.sshConnection = undefined;
+		this.sshClient = undefined;
+		this.sshClientReady = false;
+		this.validatedConnection = undefined;
+	}
+
+	private async getSshConnection(abortSignal?: AbortSignal): Promise<SshClient> {
+		if (abortSignal?.aborted) {
+			throw createAbortError();
+		}
+
+		if (this.sshConnection === undefined) {
+			const sshClient = this.createSshClient();
+			this.sshClient = sshClient;
+			this.sshClientReady = false;
+
+			const sshPromise = new Promise<SshClient>((resolve, reject) => {
+				let settled = false;
+
+				const cleanup = () => {
+					sshClient.off('ready', onReady);
+					sshClient.off('error', onError);
+					sshClient.off('close', onCloseBeforeReady);
+				};
+
+				const settle = (handler: () => void) => {
+					if (settled) {
+						return;
+					}
+
+					settled = true;
+					cleanup();
+					handler();
+				};
+
+				const onReady = () => {
+					sshClient.on('close', () => {
+						this.resetSshConnectionState(sshClient);
+					});
+
+					if (this.sshClient === sshClient) {
+						this.sshClientReady = true;
+					}
+
+					sshClient.setNoDelay(true);
+					settle(() => resolve(sshClient));
+				};
+				const onError = (error: Error) => {
+					this.resetSshConnectionState(sshClient);
+
+					settle(() => reject(error));
+				};
+				const onCloseBeforeReady = () => {
+					this.resetSshConnectionState(sshClient);
+
+					settle(() => reject(new Error('SSH connection closed before it became ready.')));
+				};
+				const config: ConnectConfig = {
+					host: trimToUndefined(this.credentials.host),
+					keepaliveCountMax: 3,
+					keepaliveInterval: 10_000,
+					passphrase: trimToUndefined(this.credentials.passphrase),
+					port: resolveConnectionPort(this.credentials.sshPort, getDefaultSshPort()),
+					privateKey: trimToUndefined(this.credentials.privateKey),
+					readyTimeout: this.timeoutMs,
+					strictVendor: true,
+					username: trimToUndefined(this.credentials.username),
+				};
+
+				sshClient.on('ready', onReady);
+				sshClient.on('error', onError);
+				sshClient.on('close', onCloseBeforeReady);
+
+				try {
+					sshClient.connect(config);
+				} catch (error) {
+					onError(error as Error);
+				}
+			});
+
+			this.sshConnection = sshPromise;
+		}
+
+		const sshConnection = this.sshConnection;
+
+		if (abortSignal === undefined) {
+			return await sshConnection;
+		}
+
+		return await new Promise<SshClient>((resolve, reject) => {
+			let settled = false;
+
+			const cleanup = () => {
+				abortSignal.removeEventListener('abort', onAbort);
+			};
+
+			const settle = (handler: () => void) => {
+				if (settled) {
+					return;
+				}
+
+				settled = true;
+				cleanup();
+				handler();
+			};
+
+			const onAbort = () => {
+				if (this.sshConnection === sshConnection && !this.sshClientReady) {
+					const currentSshClient = this.sshClient;
+
+					this.resetSshConnectionState(currentSshClient);
+
+					if (currentSshClient !== undefined) {
+						void this.closeSshClient(currentSshClient, { force: true });
+					}
+				}
+
+				settle(() => reject(createAbortError()));
+			};
+
+			if (abortSignal.aborted) {
+				onAbort();
+				return;
+			}
+
+			abortSignal.addEventListener('abort', onAbort, { once: true });
+
+			void sshConnection.then(
+				(sshClient) => {
+					settle(() => resolve(sshClient));
+				},
+				(error) => {
+					settle(() => reject(error));
+				},
+			);
+		});
+	}
+
+	private getSshRemoteSocketPath(): string {
+		return trimToUndefined(this.credentials.remoteSocketPath) ?? '/var/run/docker.sock';
+	}
+
+	private async openSshDockerSocket(abortSignal?: AbortSignal): Promise<Channel> {
+		const sshClient = await this.getSshConnection(abortSignal);
+
+		return await new Promise<Channel>((resolve, reject) => {
+			let settled = false;
+
+			const cleanup = () => {
+				abortSignal?.removeEventListener('abort', onAbort);
+			};
+
+			const settle = (handler: () => void) => {
+				if (settled) {
+					return;
+				}
+
+				settled = true;
+				cleanup();
+				handler();
+			};
+
+			const onAbort = () => {
+				settle(() => reject(createAbortError()));
+			};
+
+			if (abortSignal?.aborted) {
+				onAbort();
+				return;
+			}
+
+			abortSignal?.addEventListener('abort', onAbort, { once: true });
+
+			sshClient.openssh_forwardOutStreamLocal(this.getSshRemoteSocketPath(), (error, stream) => {
+				if (settled) {
+					stream?.destroy();
+					return;
+				}
+
+				if (error != null || stream === undefined) {
+					settle(() =>
+						reject(error ?? new Error('SSH stream-local forwarding did not return a socket.')),
+					);
+					return;
+				}
+
+				if (abortSignal?.aborted) {
+					stream.destroy();
+					onAbort();
+					return;
+				}
+
+				settle(() => resolve(this.decorateSshChannelAsSocket(stream)));
+			});
+		});
+	}
+
+	private decorateSshChannelAsSocket(stream: Channel): Channel {
+		const channel = stream as SshHttpChannel;
+
+		if (channel.__n8nSocketCompatApplied === true) {
+			return channel;
+		}
+
+		channel.__n8nSocketCompatApplied = true;
+
+		const clearSocketTimeout = () => {
+			if (channel.__n8nSocketTimeoutId !== undefined) {
+				clearTimeout(channel.__n8nSocketTimeoutId);
+				channel.__n8nSocketTimeoutId = undefined;
+			}
+		};
+		const refreshSocketTimeout = () => {
+			clearSocketTimeout();
+
+			const timeoutMs = channel.__n8nSocketTimeoutMs ?? 0;
+
+			if (timeoutMs <= 0) {
+				return;
+			}
+
+			channel.__n8nSocketTimeoutId = setTimeout(() => {
+				channel.__n8nSocketTimeoutId = undefined;
+				channel.emit('timeout');
+			}, timeoutMs);
+			channel.__n8nSocketTimeoutId.unref?.();
+		};
+		const onActivity = () => {
+			if ((channel.__n8nSocketTimeoutMs ?? 0) > 0) {
+				refreshSocketTimeout();
+			}
+		};
+
+		channel.on('close', clearSocketTimeout);
+		channel.on('data', onActivity);
+		channel.on('drain', onActivity);
+		channel.on('end', clearSocketTimeout);
+		channel.on('error', clearSocketTimeout);
+
+		if (channel.setTimeout === undefined) {
+			channel.setTimeout = (timeout = 0, callback?: () => void) => {
+				if (callback !== undefined) {
+					channel.once('timeout', callback);
+				}
+
+				channel.__n8nSocketTimeoutMs = timeout;
+
+				if (timeout > 0) {
+					refreshSocketTimeout();
+				} else {
+					clearSocketTimeout();
+				}
+
+				return channel;
+			};
+		}
+
+		channel.setKeepAlive ??= () => channel;
+		channel.setNoDelay ??= () => channel;
+		channel.ref ??= () => channel;
+		channel.unref ??= () => channel;
+
+		return channel;
+	}
+
+	private createSshHttpAgent(abortSignal?: AbortSignal): HttpAgentType {
+		const agent = new HttpAgent({
+			keepAlive: false,
+			maxSockets: 1,
+		});
+
+		agent.createConnection = (_options, callback) => {
+			void this.openSshDockerSocket(abortSignal).then(
+				(stream) => {
+					callback?.(null, stream);
+				},
+				(error) => {
+					callback?.(error as Error, undefined as unknown as Channel);
+				},
+			);
+
+			return undefined as unknown as Channel;
+		};
+
+		return agent;
 	}
 }

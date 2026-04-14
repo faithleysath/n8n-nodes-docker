@@ -272,6 +272,115 @@ async function withPatchedDockerClient(patches, run) {
 	}
 }
 
+test('Docker nodes close DockerApiClient instances after execution and trigger shutdown', async () => {
+	const dockerNode = new Docker();
+	const dockerFilesNode = new DockerFiles();
+	const dockerBuildNode = new DockerBuild();
+	const dockerTriggerNode = new DockerTrigger();
+	const buildContextBuffer = Buffer.from('build-context');
+	const buildBinaryData = {
+		data: buildContextBuffer.toString('base64'),
+		fileName: 'context.tar',
+		mimeType: 'application/x-tar',
+	};
+	let closeCalls = 0;
+
+	await withPatchedDockerClient(
+		{
+			accessMode: {
+				get() {
+					return 'fullControl';
+				},
+			},
+			async buildImage() {
+				return createDockerStreamResponse(
+					Buffer.from(`${JSON.stringify({ stream: 'build complete' })}\n`),
+				);
+			},
+			async close() {
+				closeCalls += 1;
+			},
+			async exportContainer() {
+				return {
+					body: Buffer.from('tar-export'),
+					headers: {
+						'content-type': 'application/x-tar',
+					},
+					statusCode: 200,
+				};
+			},
+			async getInfo() {
+				return { ServerVersion: 'demo' };
+			},
+			async streamEvents() {
+				return createDockerStreamResponse(undefined);
+			},
+		},
+		async () => {
+			await dockerNode.execute.call(
+				createExecuteContext({
+					node: createNodeMetadata('Docker', 'docker'),
+					parameters: {
+						operation: 'info',
+						resource: 'system',
+					},
+				}),
+			);
+
+			await dockerFilesNode.execute.call(
+				createExecuteContext({
+					node: createNodeMetadata('Docker Files', 'dockerFiles'),
+					parameters: {
+						containerId: 'demo',
+						operation: 'export',
+						outputBinaryPropertyName: 'data',
+						resource: 'container',
+					},
+				}),
+			);
+
+			await dockerBuildNode.execute.call(
+				createExecuteContext({
+					inputItems: [{ json: {}, binary: { data: buildBinaryData } }],
+					node: createNodeMetadata('Docker Build', 'dockerBuild'),
+					parameters: {
+						binaryPropertyName: 'data',
+						buildAlwaysRemoveIntermediateContainers: false,
+						buildArgs: { values: [] },
+						buildLabels: { values: [] },
+						buildNetworkMode: '',
+						buildNoCache: false,
+						buildPull: false,
+						buildQuiet: false,
+						buildRemoveIntermediateContainers: true,
+						buildTags: { values: [] },
+						builderVersion: '2',
+						dockerfilePath: 'Dockerfile',
+						operation: 'build',
+						outputMode: 'aggregate',
+						platform: '',
+						targetStage: '',
+						timeoutSeconds: 30,
+					},
+				}),
+			);
+
+			const { context } = createTriggerContext({
+				node: createNodeMetadata('Docker Trigger', 'dockerTrigger'),
+				parameters: {
+					actions: [],
+					resourceTypes: [],
+				},
+			});
+			const triggerResponse = await dockerTriggerNode.trigger.call(context);
+
+			await triggerResponse.closeFunction();
+		},
+	);
+
+	assert.equal(closeCalls, 4);
+});
+
 test('Docker exec executes commands and maps raw-stream output at the node boundary', async () => {
 	const dockerNode = new Docker();
 	const captured = {};

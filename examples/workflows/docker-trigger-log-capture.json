@@ -1,0 +1,90 @@
+{
+  "name": "Docker Trigger Log Capture",
+  "nodes": [
+    {
+      "parameters": {
+        "resourceTypes": [
+          "container"
+        ],
+        "actions": [
+          "die",
+          "restart",
+          "start",
+          "stop"
+        ]
+      },
+      "id": "docker-trigger",
+      "name": "Docker Trigger",
+      "type": "@faithleysath/n8n-nodes-docker.dockerTrigger",
+      "typeVersion": 1,
+      "position": [-520, 120],
+      "credentials": {
+        "dockerApi": {
+          "name": "Docker Events"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "resource": "container",
+        "operation": "logs",
+        "containerId": "={{$json[\"id\"]}}",
+        "includeStdout": true,
+        "includeStderr": true,
+        "logsMode": "snapshot",
+        "logsOutputMode": "aggregate",
+        "tail": "100",
+        "timestamps": false
+      },
+      "id": "docker-logs",
+      "name": "Fetch Container Logs",
+      "type": "@faithleysath/n8n-nodes-docker.docker",
+      "typeVersion": 1,
+      "position": [-220, 120],
+      "credentials": {
+        "dockerApi": {
+          "name": "Docker Events"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "mode": "manual",
+        "jsonOutput": "={\"eventType\": $json[\"Type\"], \"action\": $json[\"Action\"], \"containerId\": $json[\"containerId\"] || $json[\"id\"], \"logText\": $json[\"text\"] || $json[\"stdout\"] || \"\"}"
+      },
+      "id": "format-alert",
+      "name": "Format Alert Payload",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [60, 120]
+    }
+  ],
+  "connections": {
+    "Docker Trigger": {
+      "main": [
+        [
+          {
+            "node": "Fetch Container Logs",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch Container Logs": {
+      "main": [
+        [
+          {
+            "node": "Format Alert Payload",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "pinData": {},
+  "active": false,
+  "settings": {},
+  "versionId": "docker-trigger-log-capture-v1"
+}

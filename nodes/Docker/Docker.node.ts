@@ -1,8 +1,5 @@
 import type {
-	ICredentialDataDecryptedObject,
-	ICredentialTestFunctions,
 	IExecuteFunctions,
-	INodeCredentialTestResult,
 	INodeExecutionData,
 	INodeType,
 	INodeTypeDescription,
@@ -41,6 +38,7 @@ import {
 	createContinueOnFailItem,
 	createNodeApiError,
 } from './utils/execution';
+import { validateDockerApiConnection } from './utils/credentialTest';
 
 export class Docker implements INodeType {
 	description: INodeTypeDescription = {
@@ -51,7 +49,7 @@ export class Docker implements INodeType {
 		version: 1,
 		subtitle: '={{$parameter["operation"] + ": " + $parameter["resource"]}}',
 		description:
-			'Manage Docker containers, images, networks, volumes, and daemon metadata with Unix socket, TCP, or TLS connections',
+			'Manage Docker containers, images, networks, volumes, and daemon metadata with Unix socket, TCP, TLS, or SSH connections',
 		defaults: {
 			name: 'Docker',
 		},
@@ -68,7 +66,7 @@ export class Docker implements INodeType {
 		properties: [
 			{
 				displayName:
-					'Phase 4 keeps this main Docker node AI-usable for JSON and text operations across containers, images, networks, volumes, and daemon metadata, while adding advanced log/event streaming. Binary image save/load and filesystem tar workflows stay isolated in Docker Files, and event triggers stay isolated in Docker Trigger.',
+					'Phase 6 keeps the main Docker node AI-usable for JSON and text operations across containers, images, networks, volumes, and daemon metadata, while Docker Files remains dedicated to binary archives, Docker Build handles long-running tar workflows, and Docker Trigger owns event subscriptions.',
 				name: 'phaseTwoNotice',
 				type: 'notice',
 				default: '',
@@ -102,32 +100,7 @@ export class Docker implements INodeType {
 
 	methods = {
 		credentialTest: {
-			async validateDockerApiConnection(
-				this: ICredentialTestFunctions,
-				credential: { data?: ICredentialDataDecryptedObject },
-			): Promise<INodeCredentialTestResult> {
-				try {
-					const client = new DockerApiClient((credential.data ?? {}) as DockerCredentials);
-					const pingResult = await client.ping();
-
-					if (!pingResult.ok) {
-						return {
-							message: 'Docker daemon did not return an OK ping response.',
-							status: 'Error',
-						};
-					}
-
-					return {
-						message: `Connected to Docker daemon${pingResult.apiVersion ? ` (API ${pingResult.apiVersion})` : ''}.`,
-						status: 'OK',
-					};
-				} catch (error) {
-					return {
-						message: error instanceof Error ? error.message : 'Failed to connect to Docker daemon.',
-						status: 'Error',
-					};
-				}
-			},
+			validateDockerApiConnection,
 		},
 	};
 
@@ -138,10 +111,11 @@ export class Docker implements INodeType {
 		for (let itemIndex = 0; itemIndex < inputItems.length; itemIndex += 1) {
 			const resource = this.getNodeParameter('resource', itemIndex) as DockerResource;
 			const operation = this.getNodeParameter('operation', itemIndex) as DockerOperation;
+			let client: DockerApiClient | undefined;
 
 			try {
 				const credentials = await this.getCredentials<DockerCredentials>('dockerApi', itemIndex);
-				const client = new DockerApiClient(credentials);
+				client = new DockerApiClient(credentials);
 				const operationResult =
 					resource === 'container'
 						? await executeContainerOperation(
@@ -194,6 +168,8 @@ export class Docker implements INodeType {
 				}
 
 				throw new NodeOperationError(this.getNode(), error as Error, { itemIndex });
+			} finally {
+				await client?.close();
 			}
 		}
 

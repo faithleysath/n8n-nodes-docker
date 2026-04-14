@@ -1,6 +1,7 @@
 const assert = require('node:assert/strict');
 const { execFileSync } = require('node:child_process');
 const { randomUUID } = require('node:crypto');
+const { readFileSync } = require('node:fs');
 const test = require('node:test');
 
 const { DockerApiClient } = require('../dist/nodes/Docker/transport/dockerClient.js');
@@ -13,6 +14,7 @@ const {
 } = require('../dist/nodes/Docker/utils/tar.js');
 
 const shouldRun = process.env.RUN_DOCKER_INTEGRATION === '1';
+const shouldRunSsh = process.env.RUN_DOCKER_SSH_INTEGRATION === '1';
 
 function docker(...args) {
 	return execFileSync('docker', args, {
@@ -43,6 +45,25 @@ function createClient() {
 		apiVersion: 'auto',
 		connectionMode: 'unixSocket',
 		socketPath: process.env.DOCKER_SOCKET_PATH || '/var/run/docker.sock',
+	});
+}
+
+function createSshClient() {
+	const privateKeyPath = process.env.DOCKER_SSH_PRIVATE_KEY_PATH;
+
+	if (privateKeyPath === undefined) {
+		throw new Error('DOCKER_SSH_PRIVATE_KEY_PATH is required when RUN_DOCKER_SSH_INTEGRATION=1.');
+	}
+
+	return new DockerApiClient({
+		accessMode: 'fullControl',
+		apiVersion: 'auto',
+		connectionMode: 'ssh',
+		host: process.env.DOCKER_SSH_HOST || '127.0.0.1',
+		privateKey: readFileSync(privateKeyPath, 'utf8'),
+		remoteSocketPath: process.env.DOCKER_SSH_REMOTE_SOCKET_PATH || '/var/run/docker.sock',
+		sshPort: Number(process.env.DOCKER_SSH_PORT || 22),
+		username: process.env.DOCKER_SSH_USERNAME || 'docker',
 	});
 }
 
@@ -540,3 +561,111 @@ if (!shouldRun) {
 		}
 	});
 	}
+
+if (!shouldRunSsh) {
+	test.skip('Docker SSH integration tests require RUN_DOCKER_SSH_INTEGRATION=1', () => {});
+} else {
+	test('Docker SSH integration covers ping, logs, build, and import', async () => {
+		docker('version');
+		ensureImage('alpine:3.20');
+
+		const client = createSshClient();
+		const testId = randomUUID().slice(0, 8);
+		const runningContainerName = `n8n-ssh-log-${testId}`;
+		const importSourceContainerName = `n8n-ssh-import-src-${testId}`;
+		const builtImage = `n8n-ssh-build:${testId}`;
+		const importedImage = `n8n-ssh-import:${testId}`;
+
+		try {
+			const ping = await client.ping();
+			assert.equal(ping.ok, true);
+
+			const info = await client.getInfo();
+			assert.equal(typeof info.ServerVersion === 'string' || typeof info.ServerVersion === 'undefined', true);
+
+			docker(
+				'run',
+				'-d',
+				'--name',
+				runningContainerName,
+				'alpine:3.20',
+				'sh',
+				'-c',
+				'sleep 1; i=0; while [ "$i" -lt 3 ]; do printf "ssh-integration-%s\\n" "$i"; i=$((i+1)); sleep 1; done',
+			);
+			const logAbortController = new AbortController();
+			const logTimeout = setTimeout(() => {
+				logAbortController.abort();
+			}, 5_000);
+			const logsResponse = await client.streamContainerLogs(
+				runningContainerName,
+				{
+					follow: true,
+					stderr: true,
+					stdout: true,
+					tail: 'all',
+					timestamps: false,
+				},
+				logAbortController.signal,
+			);
+			const logsBuffer = await collectDockerStreamResponse(
+				logsResponse,
+				logAbortController.signal,
+			);
+			clearTimeout(logTimeout);
+			const logs = parseDockerRawStream(logsBuffer, logsResponse.headers['content-type']);
+			assert.equal(logs.text.includes('ssh-integration-0'), true);
+			assert.equal(logs.text.includes('ssh-integration-1'), true);
+
+			const buildContext = await createSingleFileTarArchive(
+				'Dockerfile',
+				Buffer.from('FROM alpine:3.20\nCMD ["true"]\n'),
+			);
+			const buildResponse = await client.buildImage({
+				body: buildContext,
+				tags: [builtImage],
+				timeoutMs: 0,
+				version: '2',
+			});
+			const buildBuffer = await collectDockerStreamResponse(buildResponse);
+			const buildMessages = parseDockerJsonLines(
+				buildBuffer,
+				buildResponse.headers['content-type'],
+			);
+			assert.equal(buildMessages.rawLines.length > 0, true);
+			const inspectedBuiltImage = await client.inspectImage(builtImage);
+			assert.equal(typeof inspectedBuiltImage.Id, 'string');
+
+			docker('create', '--name', importSourceContainerName, 'alpine:3.20', 'true');
+			const exportedImportSource = execFileSync(
+				'docker',
+				['export', importSourceContainerName],
+				{
+					encoding: null,
+					maxBuffer: 20 * 1024 * 1024,
+					stdio: ['ignore', 'pipe', 'pipe'],
+				},
+			);
+			const importResponse = await client.importImage({
+				body: exportedImportSource,
+				repo: 'n8n-ssh-import',
+				tag: testId,
+				timeoutMs: 0,
+			});
+			const importBuffer = await collectDockerStreamResponse(importResponse);
+			const importMessages = parseDockerJsonLines(
+				importBuffer,
+				importResponse.headers['content-type'],
+			);
+			assert.equal(importMessages.rawLines.length > 0, true);
+			const inspectedImportedImage = await client.inspectImage(importedImage);
+			assert.equal(typeof inspectedImportedImage.Id, 'string');
+		} finally {
+			await client.close();
+			dockerAllowFailure('rm', '-f', runningContainerName);
+			dockerAllowFailure('rm', '-f', importSourceContainerName);
+			dockerAllowFailure('image', 'rm', '-f', builtImage);
+			dockerAllowFailure('image', 'rm', '-f', importedImage);
+		}
+	});
+}

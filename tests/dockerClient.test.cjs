@@ -1,7 +1,9 @@
 const assert = require('node:assert/strict');
+const { generateKeyPairSync } = require('node:crypto');
 const { once } = require('node:events');
 const { mkdtempSync, rmSync, writeFileSync } = require('node:fs');
 const http = require('node:http');
+const net = require('node:net');
 const { tmpdir } = require('node:os');
 const { join } = require('node:path');
 const { PassThrough } = require('node:stream');
@@ -13,6 +15,9 @@ const {
 	encodeDockerRegistryConfig,
 	normalizeDockerApiVersion,
 } = require('../dist/nodes/Docker/transport/dockerClient.js');
+const {
+	isDockerConnectionConfigurationError,
+} = require('../dist/nodes/Docker/utils/credentialTest.js');
 const {
 	DockerJsonLinesDecoder,
 	parseDockerJsonLines,
@@ -30,6 +35,18 @@ const {
 	getDockerEventKey,
 } = require('../dist/nodes/Docker/utils/dockerEvents.js');
 
+const TEST_SSH_PRIVATE_KEY = generateKeyPairSync('rsa', {
+	modulusLength: 2048,
+	privateKeyEncoding: {
+		format: 'pem',
+		type: 'pkcs1',
+	},
+	publicKeyEncoding: {
+		format: 'pem',
+		type: 'spki',
+	},
+}).privateKey;
+
 function createRawStreamFrame(streamType, payload) {
 	const payloadBuffer = Buffer.from(payload, 'utf8');
 	const header = Buffer.alloc(8);
@@ -43,6 +60,109 @@ function createRawStreamFrame(streamType, payload) {
 async function listen(server, socketPath, host) {
 	server.listen(socketPath ?? 0, host);
 	await once(server, 'listening');
+}
+
+class FakeSshClient extends (require('node:events').EventEmitter) {
+	constructor(options = {}) {
+		super();
+		this.options = options;
+		this.connectConfigs = [];
+		this.destroyCalls = 0;
+		this.endCalls = 0;
+		this.forwardedSocketPaths = [];
+		this.noDelayCalls = [];
+	}
+
+	connect(config) {
+		this.connectConfigs.push(config);
+		if (this.options.onConnect !== undefined) {
+			this.options.onConnect(this, config);
+		} else {
+			process.nextTick(() => this.emit('ready'));
+		}
+
+		return this;
+	}
+
+	openssh_forwardOutStreamLocal(socketPath, callback) {
+		this.forwardedSocketPaths.push(socketPath);
+
+		if (this.options.onForwardOut !== undefined) {
+			this.options.onForwardOut(this, socketPath, callback);
+			return this;
+		}
+
+		process.nextTick(() => {
+			callback(new Error('No SSH forward handler configured.'), undefined);
+		});
+		return this;
+	}
+
+	setNoDelay(noDelay = true) {
+		this.noDelayCalls.push(noDelay);
+		return this;
+	}
+
+	end() {
+		this.endCalls += 1;
+		if (this.options.onEnd !== undefined) {
+			this.options.onEnd(this);
+		} else {
+			process.nextTick(() => this.emit('close'));
+		}
+
+		return this;
+	}
+
+	destroy() {
+		this.destroyCalls += 1;
+		if (this.options.onDestroy !== undefined) {
+			this.options.onDestroy(this);
+		} else {
+			process.nextTick(() => this.emit('close'));
+		}
+
+		return this;
+	}
+}
+
+function stripHttpSocketMethods(socket) {
+	socket.setKeepAlive = undefined;
+	socket.setNoDelay = undefined;
+	socket.setTimeout = undefined;
+	socket.ref = undefined;
+	socket.unref = undefined;
+	return socket;
+}
+
+function connectSocketToServer(port, callback, options = {}) {
+	const socket = net.connect(port, '127.0.0.1');
+	let settled = false;
+
+	const settle = (error, stream) => {
+		if (settled) {
+			return;
+		}
+
+		settled = true;
+		socket.off('error', onError);
+		callback(error, stream);
+	};
+
+	const onError = (error) => {
+		settle(error);
+	};
+
+	socket.once('connect', () => {
+		settle(undefined, options.stripHttpMethods ? stripHttpSocketMethods(socket) : socket);
+	});
+	socket.once('error', onError);
+}
+
+function createForwardOutHandler(port, options = {}) {
+	return (_client, _socketPath, callback) => {
+		connectSocketToServer(port, callback, options);
+	};
 }
 
 test('normalizeDockerApiVersion accepts auto and strips v prefix', () => {
@@ -361,6 +481,60 @@ test('DockerApiClient validates explicit ports, defaults omitted ports, and igno
 	);
 });
 
+test('DockerApiClient validates SSH credentials and classifies SSH config errors', async () => {
+	const missingUsernameClient = new DockerApiClient({
+		apiVersion: '1.51',
+		connectionMode: 'ssh',
+		host: '127.0.0.1',
+		privateKey: TEST_SSH_PRIVATE_KEY,
+	});
+	const missingPrivateKeyClient = new DockerApiClient({
+		apiVersion: '1.51',
+		connectionMode: 'ssh',
+		host: '127.0.0.1',
+		username: 'docker',
+	});
+	const invalidPortClient = new DockerApiClient({
+		apiVersion: '1.51',
+		connectionMode: 'ssh',
+		host: '127.0.0.1',
+		privateKey: TEST_SSH_PRIVATE_KEY,
+		sshPort: 0,
+		username: 'docker',
+	});
+	const invalidPrivateKeyClient = new DockerApiClient({
+		apiVersion: '1.51',
+		connectionMode: 'ssh',
+		host: '127.0.0.1',
+		privateKey: 'not-a-private-key',
+		username: 'docker',
+	});
+
+	await assert.rejects(
+		missingUsernameClient.validateConnectionSettings(),
+		/Username is required for SSH mode/,
+	);
+	await assert.rejects(
+		missingPrivateKeyClient.validateConnectionSettings(),
+		/Private Key is required for SSH mode/,
+	);
+	await assert.rejects(
+		invalidPortClient.validateConnectionSettings(),
+		/SSH Port must be a positive integer/,
+	);
+	await assert.rejects(
+		invalidPrivateKeyClient.validateConnectionSettings(),
+		/Private Key is not a valid SSH private key/,
+	);
+	assert.equal(
+		isDockerConnectionConfigurationError(
+			new Error('Private Key is not a valid SSH private key: malformed key'),
+		),
+		true,
+	);
+	assert.equal(isDockerConnectionConfigurationError(new Error('socket hang up')), false);
+});
+
 test('DockerApiClient retries API negotiation after an initial failure', async () => {
 	const client = new DockerApiClient({
 		apiVersion: 'auto',
@@ -384,6 +558,145 @@ test('DockerApiClient retries API negotiation after an initial failure', async (
 	assert.equal(callCount, 2);
 });
 
+test('DockerApiClient supports SSH stream-local requests with default SSH settings', async () => {
+	const requests = [];
+	const sshClients = [];
+	const server = http.createServer((request, response) => {
+		requests.push(request.url);
+		response.setHeader('content-type', 'application/json');
+		response.end(JSON.stringify({ ServerVersion: 'ssh-daemon' }));
+	});
+
+	try {
+		await listen(server, undefined, '127.0.0.1');
+
+		const address = server.address();
+		assert.notEqual(address, null);
+		assert.equal(typeof address, 'object');
+
+		const client = new DockerApiClient(
+			{
+				apiVersion: '1.51',
+				connectionMode: 'ssh',
+				host: '127.0.0.1',
+				privateKey: TEST_SSH_PRIVATE_KEY,
+				username: 'docker',
+			},
+			{
+				createSshClient: () => {
+					const sshClient = new FakeSshClient({
+						onForwardOut: createForwardOutHandler(address.port),
+					});
+					sshClients.push(sshClient);
+					return sshClient;
+				},
+			},
+		);
+		const info = await client.getInfo();
+
+		await client.close();
+
+		assert.deepEqual(info, { ServerVersion: 'ssh-daemon' });
+		assert.deepEqual(requests, ['/v1.51/info']);
+		assert.equal(sshClients.length, 1);
+		assert.equal(sshClients[0].connectConfigs[0].port, 22);
+		assert.equal(sshClients[0].connectConfigs[0].username, 'docker');
+		assert.deepEqual(sshClients[0].forwardedSocketPaths, ['/var/run/docker.sock']);
+		assert.deepEqual(sshClients[0].noDelayCalls, [true]);
+		assert.equal(sshClients[0].endCalls, 1);
+	} finally {
+		server.closeAllConnections();
+		server.close();
+	}
+});
+
+test('DockerApiClient supports custom SSH ports and remote socket paths', async () => {
+	const sshClients = [];
+	const server = http.createServer((request, response) => {
+		assert.equal(request.url, '/v1.51/info');
+		response.setHeader('content-type', 'application/json');
+		response.end(JSON.stringify({ ServerVersion: 'custom-ssh-daemon' }));
+	});
+
+	try {
+		await listen(server, undefined, '127.0.0.1');
+
+		const address = server.address();
+		assert.notEqual(address, null);
+		assert.equal(typeof address, 'object');
+
+		const client = new DockerApiClient(
+			{
+				apiVersion: '1.51',
+				connectionMode: 'ssh',
+				host: '127.0.0.1',
+				privateKey: TEST_SSH_PRIVATE_KEY,
+				remoteSocketPath: '/run/docker.sock',
+				sshPort: 2222,
+				username: 'docker',
+			},
+			{
+				createSshClient: () => {
+					const sshClient = new FakeSshClient({
+						onForwardOut: createForwardOutHandler(address.port),
+					});
+					sshClients.push(sshClient);
+					return sshClient;
+				},
+			},
+		);
+
+		await client.getInfo();
+		await client.close();
+
+		assert.equal(sshClients[0].connectConfigs[0].port, 2222);
+		assert.deepEqual(sshClients[0].forwardedSocketPaths, ['/run/docker.sock']);
+	} finally {
+		server.closeAllConnections();
+		server.close();
+	}
+});
+
+test('DockerApiClient decorates SSH channels that do not implement net.Socket timeout helpers', async () => {
+	const server = http.createServer((request, response) => {
+		assert.equal(request.url, '/v1.51/info');
+		response.setHeader('content-type', 'application/json');
+		response.end(JSON.stringify({ ServerVersion: 'ssh-compat-daemon' }));
+	});
+
+	try {
+		await listen(server, undefined, '127.0.0.1');
+
+		const address = server.address();
+		assert.notEqual(address, null);
+		assert.equal(typeof address, 'object');
+
+		const client = new DockerApiClient(
+			{
+				apiVersion: '1.51',
+				connectionMode: 'ssh',
+				host: '127.0.0.1',
+				privateKey: TEST_SSH_PRIVATE_KEY,
+				username: 'docker',
+			},
+			{
+				createSshClient: () =>
+					new FakeSshClient({
+						onForwardOut: createForwardOutHandler(address.port, {
+							stripHttpMethods: true,
+						}),
+					}),
+			},
+		);
+
+		assert.deepEqual(await client.getInfo(), { ServerVersion: 'ssh-compat-daemon' });
+		await client.close();
+	} finally {
+		server.closeAllConnections();
+		server.close();
+	}
+});
+
 test('DockerApiClient retries connection validation after an initial failure', async () => {
 	const socketDir = mkdtempSync(join(tmpdir(), 'docker-client-validate-'));
 	const socketPath = join(socketDir, 'docker.sock');
@@ -405,6 +718,151 @@ test('DockerApiClient retries connection validation after an initial failure', a
 	} finally {
 		rmSync(socketDir, { force: true, recursive: true });
 	}
+});
+
+test('DockerApiClient retries SSH connection establishment after an initial failure', async () => {
+	let factoryCalls = 0;
+	const server = http.createServer((request, response) => {
+		assert.equal(request.url, '/v1.51/info');
+		response.setHeader('content-type', 'application/json');
+		response.end(JSON.stringify({ ServerVersion: 'ssh-retry-daemon' }));
+	});
+
+	try {
+		await listen(server, undefined, '127.0.0.1');
+
+		const address = server.address();
+		assert.notEqual(address, null);
+		assert.equal(typeof address, 'object');
+
+		const client = new DockerApiClient(
+			{
+				apiVersion: '1.51',
+				connectionMode: 'ssh',
+				host: '127.0.0.1',
+				privateKey: TEST_SSH_PRIVATE_KEY,
+				username: 'docker',
+			},
+			{
+				createSshClient: () => {
+					factoryCalls += 1;
+
+					if (factoryCalls === 1) {
+						return new FakeSshClient({
+							onConnect: (sshClient) => {
+								process.nextTick(() => {
+									sshClient.emit('error', new Error('initial ssh failure'));
+								});
+							},
+						});
+					}
+
+					return new FakeSshClient({
+						onForwardOut: createForwardOutHandler(address.port),
+					});
+				},
+			},
+		);
+
+		await assert.rejects(client.getInfo(), /initial ssh failure/);
+		assert.deepEqual(await client.getInfo(), { ServerVersion: 'ssh-retry-daemon' });
+		assert.equal(factoryCalls, 2);
+		await client.close();
+	} finally {
+		server.closeAllConnections();
+		server.close();
+	}
+});
+
+test('DockerApiClient close aborts an in-progress SSH handshake before readyTimeout elapses', async () => {
+	let resolveConnectStarted;
+	const connectStarted = new Promise((resolve) => {
+		resolveConnectStarted = resolve;
+	});
+	const sshClients = [];
+	const client = new DockerApiClient(
+		{
+			apiVersion: '1.51',
+			connectionMode: 'ssh',
+			host: '127.0.0.1',
+			privateKey: TEST_SSH_PRIVATE_KEY,
+			username: 'docker',
+		},
+		{
+			createSshClient: () => {
+				const sshClient = new FakeSshClient({
+					onConnect: () => {
+						resolveConnectStarted();
+					},
+				});
+				sshClients.push(sshClient);
+				return sshClient;
+			},
+			timeoutMs: 5_000,
+		},
+	);
+	const infoPromise = client.getInfo();
+
+	await connectStarted;
+
+	const closeStartedAt = Date.now();
+	await client.close();
+	const closeElapsedMs = Date.now() - closeStartedAt;
+
+	await assert.rejects(infoPromise, (error) => {
+		return (
+			error instanceof Error &&
+			/SSH connection closed before it became ready|The operation was aborted|socket hang up/.test(
+				error.message,
+			)
+		);
+	});
+	assert.equal(closeElapsedMs < 1_000, true);
+	assert.equal(sshClients[0].destroyCalls, 1);
+	assert.equal(sshClients[0].endCalls, 0);
+});
+
+test('DockerApiClient aborts an in-progress SSH handshake before readyTimeout elapses', async () => {
+	let resolveConnectStarted;
+	const connectStarted = new Promise((resolve) => {
+		resolveConnectStarted = resolve;
+	});
+	const abortController = new AbortController();
+	const sshClients = [];
+	const client = new DockerApiClient(
+		{
+			apiVersion: '1.51',
+			connectionMode: 'ssh',
+			host: '127.0.0.1',
+			privateKey: TEST_SSH_PRIVATE_KEY,
+			username: 'docker',
+		},
+		{
+			createSshClient: () => {
+				const sshClient = new FakeSshClient({
+					onConnect: () => {
+						resolveConnectStarted();
+					},
+				});
+				sshClients.push(sshClient);
+				return sshClient;
+			},
+			timeoutMs: 5_000,
+		},
+	);
+	const infoPromise = client.getInfo(abortController.signal);
+
+	await connectStarted;
+
+	const abortStartedAt = Date.now();
+	abortController.abort();
+
+	await assert.rejects(infoPromise, /The operation was aborted/);
+	assert.equal(Date.now() - abortStartedAt < 1_000, true);
+	assert.equal(sshClients[0].destroyCalls, 1);
+	assert.equal(sshClients[0].endCalls, 0);
+
+	await client.close();
 });
 
 test('DockerApiClient streams build and import endpoints with expected query strings and headers', async () => {
@@ -677,6 +1135,59 @@ test('DockerApiClient disables default idle timeouts for event and log streams',
 			{ message: 'stdout line', stream: 'stdout' },
 			{ message: 'stderr line', stream: 'stderr' },
 		]);
+	} finally {
+		server.closeAllConnections();
+		server.close();
+	}
+});
+
+test('DockerApiClient close tears down active SSH event streams', async () => {
+	const sshClients = [];
+	const server = http.createServer((request, response) => {
+		assert.equal(request.url, '/v1.51/events?since=1');
+		response.setHeader('content-type', 'application/json');
+		response.write(`${JSON.stringify({ Action: 'start', Type: 'container', time: 1 })}\n`);
+	});
+
+	try {
+		await listen(server, undefined, '127.0.0.1');
+
+		const address = server.address();
+		assert.notEqual(address, null);
+		assert.equal(typeof address, 'object');
+
+		const client = new DockerApiClient(
+			{
+				apiVersion: '1.51',
+				connectionMode: 'ssh',
+				host: '127.0.0.1',
+				privateKey: TEST_SSH_PRIVATE_KEY,
+				username: 'docker',
+			},
+			{
+				createSshClient: () => {
+					const sshClient = new FakeSshClient({
+						onForwardOut: createForwardOutHandler(address.port),
+					});
+					sshClients.push(sshClient);
+					return sshClient;
+				},
+			},
+		);
+		const streamResponse = await client.streamEvents({ since: '1' });
+		let closeError;
+
+		await once(streamResponse.stream, 'data');
+		streamResponse.stream.once('error', (error) => {
+			closeError = error;
+		});
+		const streamClosed = once(streamResponse.stream, 'close');
+
+		await client.close();
+		await streamClosed;
+
+		assert.equal(sshClients[0].endCalls, 1);
+		assert.equal(closeError?.message.includes('aborted') ?? true, true);
 	} finally {
 		server.closeAllConnections();
 		server.close();

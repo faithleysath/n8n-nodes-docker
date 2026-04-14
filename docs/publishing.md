@@ -1,7 +1,7 @@
 # Publishing to npm
 
 This project is ready for self-hosted n8n usage, but there are still a few
-owner-specific values to set before the first public npm release.
+owner-specific values to confirm before each public npm release.
 
 ## 1. Pick a package name
 
@@ -28,8 +28,6 @@ Before publishing, make sure the GitHub repository is pushed and publicly
 accessible.
 
 ## 3. Create or log in to your npm account
-
-On this machine you are not logged in yet.
 
 Run:
 
@@ -67,30 +65,39 @@ Fallback setup: npm token
 pnpm lint
 pnpm test
 RUN_DOCKER_INTEGRATION=1 node --test tests/docker.integration.test.cjs
+pnpm test:ssh:local
 pnpm build
 npm pack --dry-run
 ```
 
+`pnpm test` covers the base unit/regression suite.
+
+`RUN_DOCKER_INTEGRATION=1 node --test tests/docker.integration.test.cjs` covers the real-daemon Docker integration branch.
+
+`pnpm test:ssh:local` is optional and uses a temporary local `sshd` to exercise the SSH transport against the current machine.
+
 `npm pack --dry-run` is useful for confirming exactly what files will ship.
 
-## 6. Recommended first release flow
+If you already have a prepared SSH target and want the integration file to run without skips, invoke `tests/docker.integration.test.cjs` directly with both `RUN_DOCKER_INTEGRATION=1` and `RUN_DOCKER_SSH_INTEGRATION=1`.
 
-For a first release, use the simplest path:
+## 6. Recommended release flow
+
+For a normal release, use the simplest path:
 
 1. Update `package.json` fields and version.
 2. Update `CHANGELOG.md`.
 3. Commit and push your branch to GitHub.
-4. Create and push a `v`-prefixed semver tag such as `v0.2.1`.
+4. Create and push a `v`-prefixed semver tag such as `v1.0.1`.
 5. Let GitHub Actions publish the package to npm.
 
 Example:
 
 ```bash
 git add .
-git commit -m "Prepare first npm release"
+git commit -m "Prepare npm release"
 git push origin main
-git tag v0.2.1
-git push origin v0.2.1
+git tag v1.0.1
+git push origin v1.0.1
 ```
 
 ## 7. Optional release helper

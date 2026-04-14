@@ -12,7 +12,7 @@ export class DockerApi implements ICredentialType {
 	properties: INodeProperties[] = [
 		{
 			displayName:
-				'Phase 4 supports Unix Socket, TCP, and TLS across Docker, Docker Files, and Docker Trigger, including advanced log/event streaming. SSH is still planned for a later phase because n8n credential tests do not support Docker-over-SSH transport out of the box.',
+				'Phase 6 supports Unix Socket, TCP, TLS, and SSH-backed remote socket access across Docker, Docker Files, Docker Build, and Docker Trigger. SSH credentials use key-based authentication to reach a remote Unix socket such as /var/run/docker.sock.',
 			name: 'phaseTwoNotice',
 			type: 'notice',
 			default: '',
@@ -38,6 +38,11 @@ export class DockerApi implements ICredentialType {
 					value: 'tls',
 					description: 'Connect to a remote Docker daemon over mutual TLS',
 				},
+				{
+					name: 'SSH',
+					value: 'ssh',
+					description: 'Connect to a remote Docker Unix socket over SSH using a private key',
+				},
 			],
 		},
 		{
@@ -59,7 +64,7 @@ export class DockerApi implements ICredentialType {
 			required: true,
 			displayOptions: {
 				show: {
-					connectionMode: ['tcp', 'tls'],
+					connectionMode: ['tcp', 'tls', 'ssh'],
 				},
 			},
 			placeholder: 'docker.example.internal',
@@ -78,6 +83,32 @@ export class DockerApi implements ICredentialType {
 			description: 'Use 2375 for plain TCP or 2376 for TLS by default',
 		},
 		{
+			displayName: 'Username',
+			name: 'username',
+			type: 'string',
+			default: '',
+			required: true,
+			displayOptions: {
+				show: {
+					connectionMode: ['ssh'],
+				},
+			},
+			placeholder: 'docker',
+			description: 'SSH user that can reach the remote Docker socket',
+		},
+		{
+			displayName: 'SSH Port',
+			name: 'sshPort',
+			type: 'number',
+			default: 22,
+			required: true,
+			displayOptions: {
+				show: {
+					connectionMode: ['ssh'],
+				},
+			},
+		},
+		{
 			displayName: 'Passphrase',
 			name: 'passphrase',
 			type: 'string',
@@ -88,9 +119,10 @@ export class DockerApi implements ICredentialType {
 			},
 			displayOptions: {
 				show: {
-					connectionMode: ['tls'],
+					connectionMode: ['tls', 'ssh'],
 				},
 			},
+			description: 'Passphrase for the TLS key or encrypted SSH private key, if required',
 		},
 		{
 			displayName: 'CA Certificate',
@@ -148,6 +180,34 @@ export class DockerApi implements ICredentialType {
 				},
 			},
 			description: 'Whether to connect even if certificate validation fails',
+		},
+		{
+			displayName: 'Private Key',
+			name: 'privateKey',
+			type: 'string',
+			default: '',
+			typeOptions: {
+				password: true,
+				rows: 8,
+			},
+			displayOptions: {
+				show: {
+					connectionMode: ['ssh'],
+				},
+			},
+			description: 'OpenSSH private key used to connect to the remote host',
+		},
+		{
+			displayName: 'Remote Socket Path',
+			name: 'remoteSocketPath',
+			type: 'string',
+			default: '/var/run/docker.sock',
+			displayOptions: {
+				show: {
+					connectionMode: ['ssh'],
+				},
+			},
+			description: 'Unix socket path on the remote host that exposes the Docker daemon',
 		},
 		{
 			displayName: 'API Version',

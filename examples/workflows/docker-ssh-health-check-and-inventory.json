@@ -1,0 +1,76 @@
+{
+  "name": "Docker SSH Health Check and Inventory",
+  "nodes": [
+    {
+      "parameters": {},
+      "id": "manual-trigger",
+      "name": "Manual Trigger",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [-520, 40]
+    },
+    {
+      "parameters": {
+        "resource": "system",
+        "operation": "info"
+      },
+      "id": "docker-info",
+      "name": "Docker Info",
+      "type": "@faithleysath/n8n-nodes-docker.docker",
+      "typeVersion": 1,
+      "position": [-260, -40],
+      "credentials": {
+        "dockerApi": {
+          "name": "Docker SSH"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "resource": "container",
+        "operation": "list",
+        "allContainers": true,
+        "returnAll": false,
+        "limit": 50
+      },
+      "id": "docker-containers",
+      "name": "List Containers",
+      "type": "@faithleysath/n8n-nodes-docker.docker",
+      "typeVersion": 1,
+      "position": [20, 120],
+      "credentials": {
+        "dockerApi": {
+          "name": "Docker SSH"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Manual Trigger": {
+      "main": [
+        [
+          {
+            "node": "Docker Info",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Docker Info": {
+      "main": [
+        [
+          {
+            "node": "List Containers",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "pinData": {},
+  "active": false,
+  "settings": {},
+  "versionId": "docker-ssh-health-check-v1"
+}
