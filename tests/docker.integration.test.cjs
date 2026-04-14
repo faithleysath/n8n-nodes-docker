@@ -4,6 +4,7 @@ const { randomUUID } = require('node:crypto');
 const { readFileSync } = require('node:fs');
 const test = require('node:test');
 
+const { Docker } = require('../dist/nodes/Docker/Docker.node.js');
 const { DockerApiClient } = require('../dist/nodes/Docker/transport/dockerClient.js');
 const { collectDockerStreamResponse } = require('../dist/nodes/Docker/transport/dockerStreams.js');
 const { parseDockerJsonLines } = require('../dist/nodes/Docker/transport/dockerJsonLines.js');
@@ -46,6 +47,45 @@ function createClient() {
 		connectionMode: 'unixSocket',
 		socketPath: process.env.DOCKER_SOCKET_PATH || '/var/run/docker.sock',
 	});
+}
+
+function createDockerNodeContext(parameters) {
+	return {
+		continueOnFail() {
+			return false;
+		},
+		async getCredentials() {
+			return {
+				accessMode: 'fullControl',
+				apiVersion: 'auto',
+				connectionMode: 'unixSocket',
+				socketPath: process.env.DOCKER_SOCKET_PATH || '/var/run/docker.sock',
+			};
+		},
+		getExecutionCancelSignal() {
+			return undefined;
+		},
+		getInputData() {
+			return [{ json: {} }];
+		},
+		getNode() {
+			return {
+				id: '1',
+				name: 'Docker',
+				parameters: {},
+				position: [0, 0],
+				type: 'docker',
+				typeVersion: 1,
+			};
+		},
+		getNodeParameter(name, _itemIndex, defaultValue) {
+			if (Object.hasOwn(parameters, name)) {
+				return parameters[name];
+			}
+
+			return defaultValue;
+		},
+	};
 }
 
 function createSshClient() {
@@ -148,8 +188,230 @@ if (!shouldRun) {
 					removeVolumes: true,
 				});
 			} catch {}
-			}
-		});
+		}
+	});
+
+	test('Docker integration covers container text convenience operations', async () => {
+		docker('version');
+		ensureImage('alpine:3.20');
+
+		const dockerNode = new Docker();
+		const client = createClient();
+		const containerName = `n8n-text-${randomUUID().slice(0, 8)}`;
+
+		try {
+			docker(
+				'create',
+				'--name',
+				containerName,
+				'alpine:3.20',
+				'sh',
+				'-lc',
+				[
+					'mkdir -p /workspace/src /workspace/search-ignored',
+					'mkdir -p /workspace/.hidden-root/visible /workspace/.hidden-root/.nested-hidden',
+					'printf "alpha\\r\\nbeta\\r\\ngamma\\r\\n" >/workspace/src/app.txt',
+					'printf "sidecar\\n" >/workspace/src/other.txt',
+					'printf "limit-one\\nlimit-two\\nlimit-three\\n" >/workspace/src/limit.txt',
+					'printf "ignored.txt\\n" >/workspace/search-ignored/.ignore',
+					'printf "needle\\n" >/workspace/search-ignored/ignored.txt',
+					'printf "visible\\n" >/workspace/.hidden-root/visible/app.txt',
+					'printf "secret\\n" >/workspace/.hidden-root/.nested-hidden/secret.txt',
+					'sleep 60',
+				].join(' && '),
+			);
+			docker('start', containerName);
+
+			const [readWindowItems] = await dockerNode.execute.call(
+				createDockerNodeContext({
+					containerId: containerName,
+					endLine: '3',
+					filePath: 'src/app.txt',
+					operation: 'readTextFile',
+					resource: 'container',
+					startLine: '2',
+					workingPath: '/workspace',
+				}),
+			);
+			assert.equal(readWindowItems.length, 1);
+			assert.equal(readWindowItems[0].json.content, 'beta\ngamma');
+
+			const [listItems] = await dockerNode.execute.call(
+				createDockerNodeContext({
+					containerId: containerName,
+					glob: '',
+					includeHidden: false,
+					listFilesReturnAll: true,
+					maxDepth: 3,
+					operation: 'listFiles',
+					resource: 'container',
+					workingPath: '/workspace',
+				}),
+			);
+			assert.equal(
+				listItems.some(
+					(item) =>
+						item.json.path === 'src/app.txt' && item.json.entryType === 'file',
+				),
+				true,
+			);
+			const [hiddenRootListItems] = await dockerNode.execute.call(
+				createDockerNodeContext({
+					containerId: containerName,
+					glob: '',
+					includeHidden: false,
+					listFilesReturnAll: true,
+					maxDepth: 3,
+					operation: 'listFiles',
+					resource: 'container',
+					workingPath: '/workspace/.hidden-root',
+				}),
+			);
+			assert.deepEqual(
+				hiddenRootListItems.map((item) => item.json.path),
+				['visible', 'visible/app.txt'],
+			);
+
+			const [searchItems] = await dockerNode.execute.call(
+				createDockerNodeContext({
+					caseSensitive: false,
+					containerId: containerName,
+					glob: '*.txt',
+					operation: 'searchText',
+					query: 'beta',
+					resource: 'container',
+					searchTextReturnAll: true,
+					workingPath: '/workspace',
+				}),
+			);
+			assert.equal(searchItems.length, 1);
+			assert.equal(searchItems[0].json.path, 'src/app.txt');
+			assert.equal(searchItems[0].json.line, 2);
+			assert.equal(searchItems[0].json.text, 'beta');
+			const [limitedSearchItems] = await dockerNode.execute.call(
+				createDockerNodeContext({
+					caseSensitive: false,
+					containerId: containerName,
+					glob: '*.txt',
+					operation: 'searchText',
+					query: 'limit',
+					resource: 'container',
+					searchTextLimit: 2,
+					searchTextReturnAll: false,
+					workingPath: '/workspace',
+				}),
+			);
+			assert.equal(limitedSearchItems.length, 2);
+			assert.deepEqual(
+				limitedSearchItems.map((item) => item.json.text),
+				['limit-one', 'limit-two'],
+			);
+
+			const [ignoredSearchItems] = await dockerNode.execute.call(
+				createDockerNodeContext({
+					caseSensitive: false,
+					containerId: containerName,
+					glob: '*.txt',
+					operation: 'searchText',
+					query: 'needle',
+					resource: 'container',
+					searchTextReturnAll: true,
+					workingPath: '/workspace/search-ignored',
+				}),
+			);
+			assert.equal(ignoredSearchItems.length, 1);
+			assert.equal(ignoredSearchItems[0].json.path, 'ignored.txt');
+
+			const [replaceItems] = await dockerNode.execute.call(
+				createDockerNodeContext({
+					containerId: containerName,
+					filePath: 'src/app.txt',
+					newText: 'BETA',
+					oldText: 'beta',
+					operation: 'replaceExactText',
+					resource: 'container',
+					workingPath: '/workspace',
+				}),
+			);
+			assert.equal(replaceItems[0].json.replacementCount, 1);
+
+			const replacedArchive = await client.getContainerArchive(containerName, {
+				path: '/workspace/src/app.txt',
+			});
+			const replacedFile = await extractSingleFileFromTarBuffer(replacedArchive.body);
+			assert.equal(replacedFile.file.content.toString('utf8'), 'alpha\r\nBETA\r\ngamma\r\n');
+
+			const [writeItems] = await dockerNode.execute.call(
+				createDockerNodeContext({
+					containerId: containerName,
+					content: 'hello convenience\n',
+					createParentDirectories: true,
+					filePath: 'generated/new.txt',
+					operation: 'writeTextFile',
+					resource: 'container',
+					workingPath: '/workspace',
+				}),
+			);
+			assert.equal(writeItems[0].json.bytesWritten > 0, true);
+
+			const [verifyAppItems] = await dockerNode.execute.call(
+				createDockerNodeContext({
+					containerId: containerName,
+					filePath: 'src/app.txt',
+					operation: 'readTextFile',
+					resource: 'container',
+					workingPath: '/workspace',
+				}),
+			);
+			assert.equal(verifyAppItems[0].json.content, 'alpha\nBETA\ngamma');
+
+			const [verifyWriteItems] = await dockerNode.execute.call(
+				createDockerNodeContext({
+					containerId: containerName,
+					filePath: 'generated/new.txt',
+					operation: 'readTextFile',
+					resource: 'container',
+					workingPath: '/workspace',
+				}),
+			);
+			assert.equal(verifyWriteItems[0].json.content, 'hello convenience');
+
+			await assert.rejects(
+				async () =>
+					await dockerNode.execute.call(
+						createDockerNodeContext({
+							containerId: containerName,
+							glob: '',
+							includeHidden: false,
+							listFilesReturnAll: true,
+							maxDepth: 3,
+							operation: 'listFiles',
+							resource: 'container',
+							workingPath: '/workspace/missing',
+						}),
+					),
+				/Working Path "\/workspace\/missing" was not found in the container\./,
+			);
+			await assert.rejects(
+				async () =>
+					await dockerNode.execute.call(
+						createDockerNodeContext({
+							caseSensitive: false,
+							containerId: containerName,
+							glob: '*.txt',
+							operation: 'searchText',
+							query: 'needle',
+							resource: 'container',
+							searchTextReturnAll: true,
+							workingPath: '/workspace/missing',
+						}),
+					),
+				/Working Path "\/workspace\/missing" was not found in the container\./,
+			);
+		} finally {
+			dockerAllowFailure('rm', '-f', containerName);
+		}
+	});
 
 	test('Docker integration covers Phase 3 image and system operations', async () => {
 		docker('version');

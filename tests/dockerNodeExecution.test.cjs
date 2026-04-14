@@ -483,6 +483,590 @@ test('Docker exec executes commands and maps raw-stream output at the node bound
 	);
 });
 
+test('Docker readTextFile reads a text file and returns the requested line window', async () => {
+	const dockerNode = new Docker();
+	const archiveBody = await createSingleFileTarArchive(
+		'report.txt',
+		Buffer.from('alpha\r\nbeta\r\ngamma\r\n', 'utf8'),
+	);
+	const context = createExecuteContext({
+		node: createNodeMetadata('Docker', 'docker'),
+		parameters: {
+			containerId: 'demo',
+			endLine: '3',
+			filePath: 'reports/report.txt',
+			operation: 'readTextFile',
+			resource: 'container',
+			startLine: '2',
+			workingPath: '/workspace',
+		},
+	});
+
+	await withPatchedDockerClient(
+		{
+			async getContainerArchive(containerId, options) {
+				assert.equal(containerId, 'demo');
+				assert.deepEqual(options, { path: '/workspace/reports/report.txt' });
+
+				return {
+					body: archiveBody,
+					headers: {
+						'content-type': 'application/x-tar',
+					},
+					statusCode: 200,
+				};
+			},
+		},
+		async () => {
+			const [items] = await dockerNode.execute.call(context);
+
+			assert.deepEqual(items.map((item) => item.json), [
+				{
+					containerId: 'demo',
+					content: 'beta\ngamma',
+					fileByteCount: Buffer.byteLength('alpha\r\nbeta\r\ngamma\r\n', 'utf8'),
+					hasMoreAfter: false,
+					hasMoreBefore: true,
+					lineEnd: 3,
+					lineStart: 2,
+					operation: 'readTextFile',
+					requestedEndLine: 3,
+					requestedPath: 'reports/report.txt',
+					requestedStartLine: 2,
+					resolvedPath: '/workspace/reports/report.txt',
+					returnedLineCount: 2,
+					totalLineCount: 3,
+				},
+			]);
+		},
+	);
+});
+
+test('Docker readTextFile rejects invalid line windows before making Docker requests', async () => {
+	const dockerNode = new Docker();
+	const context = createExecuteContext({
+		node: createNodeMetadata('Docker', 'docker'),
+		parameters: {
+			containerId: 'demo',
+			endLine: '2',
+			filePath: 'report.txt',
+			operation: 'readTextFile',
+			resource: 'container',
+			startLine: '3',
+			workingPath: '/workspace',
+		},
+	});
+
+	await assert.rejects(async () => await dockerNode.execute.call(context), (error) => {
+		assert.equal(error.name, 'NodeOperationError');
+		assert.equal(error.message.includes('Start Line must be less than or equal to End Line.'), true);
+		return true;
+	});
+});
+
+test('Docker readTextFile surfaces invalid UTF-8 content as a node error', async () => {
+	const dockerNode = new Docker();
+	const archiveBody = await createSingleFileTarArchive(
+		'report.txt',
+		Buffer.from([0x66, 0x6f, 0x80, 0x6f]),
+	);
+	const context = createExecuteContext({
+		node: createNodeMetadata('Docker', 'docker'),
+		parameters: {
+			containerId: 'demo',
+			filePath: 'reports/report.txt',
+			operation: 'readTextFile',
+			resource: 'container',
+			workingPath: '/workspace',
+		},
+	});
+
+	await withPatchedDockerClient(
+		{
+			async getContainerArchive() {
+				return {
+					body: archiveBody,
+					headers: {
+						'content-type': 'application/x-tar',
+					},
+					statusCode: 200,
+				};
+			},
+		},
+		async () => {
+			await assert.rejects(async () => await dockerNode.execute.call(context), (error) => {
+				assert.equal(error.name, 'NodeOperationError');
+				assert.equal(
+					error.message.includes('is not valid UTF-8 text and cannot be returned as text.'),
+					true,
+				);
+				return true;
+			});
+		},
+	);
+});
+
+test('Docker listFiles executes the fixed helper command and maps file entries to items', async () => {
+	const dockerNode = new Docker();
+	const captured = {};
+	const rawOutput = Buffer.concat([
+		createRawStreamFrame(1, 'directory\tsrc\n'),
+		createRawStreamFrame(1, 'file\tsrc/app.ts\n'),
+	]);
+	const context = createExecuteContext({
+		node: createNodeMetadata('Docker', 'docker'),
+		parameters: {
+			containerId: 'demo',
+			glob: '',
+			includeHidden: false,
+			listFilesLimit: 1,
+			listFilesReturnAll: false,
+			maxDepth: 3,
+			operation: 'listFiles',
+			resource: 'container',
+			workingPath: '/workspace',
+		},
+	});
+
+	await withPatchedDockerClient(
+		{
+			async createContainerExec(containerId, body) {
+				captured.createContainerExec = { body, containerId };
+				return { Id: 'exec-list-files' };
+			},
+			async inspectContainerExec(execId) {
+				assert.equal(execId, 'exec-list-files');
+				return { ExitCode: 0, ID: execId, Running: false };
+			},
+			async startContainerExec(execId, body) {
+				assert.equal(execId, 'exec-list-files');
+				assert.deepEqual(body, { Detach: false, Tty: false });
+				return {
+					body: rawOutput,
+					headers: {
+						'content-type': 'application/vnd.docker.raw-stream',
+					},
+					statusCode: 200,
+				};
+			},
+		},
+		async () => {
+			const [items] = await dockerNode.execute.call(context);
+
+			assert.deepEqual(items.map((item) => item.json), [
+				{
+					absolutePath: '/workspace/src',
+					containerId: 'demo',
+					entryType: 'directory',
+					operation: 'listFiles',
+					path: 'src',
+					workingPath: '/workspace',
+				},
+			]);
+			assert.equal(captured.createContainerExec.containerId, 'demo');
+			assert.deepEqual(captured.createContainerExec.body.Cmd.slice(0, 2), ['/bin/sh', '-lc']);
+			assert.equal(
+				captured.createContainerExec.body.Cmd[2].includes('find is required for listFiles'),
+				true,
+			);
+			assert.deepEqual(captured.createContainerExec.body.Env, [
+				'GLOB=',
+				'INCLUDE_HIDDEN=false',
+				'LIST_ROOT=/workspace',
+				'MAX_DEPTH=3',
+				'MAX_ENTRIES=1',
+			]);
+			assert.equal(captured.createContainerExec.body.WorkingDir, '/');
+		},
+	);
+});
+
+test('Docker searchText returns no items when grep-style search reports no matches', async () => {
+	const dockerNode = new Docker();
+	const captured = {};
+	const context = createExecuteContext({
+		node: createNodeMetadata('Docker', 'docker'),
+		parameters: {
+			caseSensitive: false,
+			containerId: 'demo',
+			glob: '*.ts',
+			operation: 'searchText',
+			query: 'missing',
+			resource: 'container',
+			searchTextLimit: 5,
+			searchTextReturnAll: false,
+			workingPath: '/workspace',
+		},
+	});
+
+	await withPatchedDockerClient(
+		{
+			async createContainerExec(containerId, body) {
+				captured.createContainerExec = { body, containerId };
+				return { Id: 'exec-search-text' };
+			},
+			async inspectContainerExec(execId) {
+				assert.equal(execId, 'exec-search-text');
+				return { ExitCode: 1, ID: execId, Running: false };
+			},
+			async startContainerExec(execId) {
+				assert.equal(execId, 'exec-search-text');
+				return {
+					body: Buffer.alloc(0),
+					headers: {
+						'content-type': 'application/vnd.docker.raw-stream',
+					},
+					statusCode: 200,
+				};
+			},
+		},
+		async () => {
+			const [items] = await dockerNode.execute.call(context);
+
+			assert.equal(items.length, 0);
+			assert.equal(captured.createContainerExec.containerId, 'demo');
+			assert.equal(captured.createContainerExec.body.WorkingDir, '/');
+			assert.equal(captured.createContainerExec.body.Cmd[2].includes('--no-ignore'), true);
+			assert.deepEqual(captured.createContainerExec.body.Env, [
+				'CASE_SENSITIVE=false',
+				'GLOB=*.ts',
+				'MAX_MATCHES=5',
+				'QUERY=missing',
+				'SEARCH_ROOT=/workspace',
+			]);
+		},
+	);
+});
+
+test('Docker listFiles and searchText surface missing working paths as node errors', async () => {
+	const dockerNode = new Docker();
+	const listContext = createExecuteContext({
+		node: createNodeMetadata('Docker', 'docker'),
+		parameters: {
+			containerId: 'demo',
+			glob: '',
+			includeHidden: false,
+			listFilesReturnAll: true,
+			maxDepth: 3,
+			operation: 'listFiles',
+			resource: 'container',
+			workingPath: '/missing',
+		},
+	});
+	const searchContext = createExecuteContext({
+		node: createNodeMetadata('Docker', 'docker'),
+		parameters: {
+			caseSensitive: false,
+			containerId: 'demo',
+			glob: '',
+			operation: 'searchText',
+			query: 'needle',
+			resource: 'container',
+			searchTextReturnAll: true,
+			workingPath: '/missing',
+		},
+	});
+	let executionCount = 0;
+
+	await withPatchedDockerClient(
+		{
+			async createContainerExec() {
+				executionCount += 1;
+
+				return { Id: `exec-missing-${executionCount}` };
+			},
+			async inspectContainerExec(execId) {
+				return { ExitCode: 0, ID: execId, Running: false };
+			},
+			async startContainerExec(execId) {
+				return {
+					body: Buffer.concat([
+						createRawStreamFrame(1, '__ERROR__\tPATH_NOT_FOUND\t/missing\n'),
+					]),
+					headers: {
+						'content-type': 'application/vnd.docker.raw-stream',
+					},
+					statusCode: 200,
+				};
+			},
+		},
+		async () => {
+			await assert.rejects(
+				async () => await dockerNode.execute.call(listContext),
+				/Working Path "\/missing" was not found in the container\./,
+			);
+			await assert.rejects(
+				async () => await dockerNode.execute.call(searchContext),
+				/Working Path "\/missing" was not found in the container\./,
+			);
+		},
+	);
+});
+
+test('Docker writeTextFile can create parent directories and upload UTF-8 content', async () => {
+	const dockerNode = new Docker();
+	const captured = {};
+	const context = createExecuteContext({
+		node: createNodeMetadata('Docker', 'docker'),
+		parameters: {
+			containerId: 'demo',
+			content: 'GREETING=hello\n',
+			createParentDirectories: true,
+			filePath: 'config/app.env',
+			operation: 'writeTextFile',
+			resource: 'container',
+			workingPath: '/workspace',
+		},
+	});
+
+	await withPatchedDockerClient(
+		{
+			accessMode: {
+				get() {
+					return 'fullControl';
+				},
+			},
+			async createContainerExec(containerId, body) {
+				captured.createContainerExec = { body, containerId };
+				return { Id: 'exec-write-text' };
+			},
+			async inspectContainerExec(execId) {
+				assert.equal(execId, 'exec-write-text');
+				return { ExitCode: 0, ID: execId, Running: false };
+			},
+			async putContainerArchive(containerId, options) {
+				captured.putContainerArchive = { containerId, options };
+				return {
+					changed: true,
+					statusCode: 200,
+				};
+			},
+			async startContainerExec(execId) {
+				assert.equal(execId, 'exec-write-text');
+				return {
+					body: Buffer.alloc(0),
+					headers: {
+						'content-type': 'application/vnd.docker.raw-stream',
+					},
+					statusCode: 200,
+				};
+			},
+		},
+		async () => {
+			const [items] = await dockerNode.execute.call(context);
+			const extracted = await extractSingleFileFromTarBuffer(captured.putContainerArchive.options.body);
+
+			assert.deepEqual(items.map((item) => item.json), [
+				{
+					bytesWritten: Buffer.byteLength('GREETING=hello\n', 'utf8'),
+					changed: true,
+					containerId: 'demo',
+					operation: 'writeTextFile',
+					requestedPath: 'config/app.env',
+					resolvedPath: '/workspace/config/app.env',
+					statusCode: 200,
+				},
+			]);
+			assert.equal(captured.createContainerExec.containerId, 'demo');
+			assert.deepEqual(captured.createContainerExec.body.Env, ['TARGET_DIR=/workspace/config']);
+			assert.equal(captured.putContainerArchive.containerId, 'demo');
+			assert.equal(captured.putContainerArchive.options.path, '/workspace/config');
+			assert.equal(extracted.file.fileName, 'app.env');
+			assert.equal(extracted.file.content.toString('utf8'), 'GREETING=hello\n');
+		},
+	);
+});
+
+test('Docker replaceExactText rewrites a file only when the old text matches once', async () => {
+	const dockerNode = new Docker();
+	const captured = {};
+	const archiveBody = await createSingleFileTarArchive(
+		'app.txt',
+		Buffer.from('hello\r\nold\r\n', 'utf8'),
+	);
+	const context = createExecuteContext({
+		node: createNodeMetadata('Docker', 'docker'),
+		parameters: {
+			containerId: 'demo',
+			filePath: 'app.txt',
+			newText: 'new',
+			oldText: 'old',
+			operation: 'replaceExactText',
+			resource: 'container',
+			workingPath: '/workspace',
+		},
+	});
+
+	await withPatchedDockerClient(
+		{
+			accessMode: {
+				get() {
+					return 'fullControl';
+				},
+			},
+			async getContainerArchive(containerId, options) {
+				assert.equal(containerId, 'demo');
+				assert.deepEqual(options, { path: '/workspace/app.txt' });
+				return {
+					body: archiveBody,
+					headers: {
+						'content-type': 'application/x-tar',
+					},
+					statusCode: 200,
+				};
+			},
+			async putContainerArchive(containerId, options) {
+				captured.putContainerArchive = { containerId, options };
+				return {
+					changed: true,
+					statusCode: 200,
+				};
+			},
+		},
+		async () => {
+			const [items] = await dockerNode.execute.call(context);
+			const extracted = await extractSingleFileFromTarBuffer(captured.putContainerArchive.options.body);
+
+			assert.deepEqual(items.map((item) => item.json), [
+				{
+					bytesWritten: Buffer.byteLength('hello\r\nnew\r\n', 'utf8'),
+					changed: true,
+					containerId: 'demo',
+					operation: 'replaceExactText',
+					replacementCount: 1,
+					requestedPath: 'app.txt',
+					resolvedPath: '/workspace/app.txt',
+					statusCode: 200,
+				},
+			]);
+			assert.equal(captured.putContainerArchive.options.path, '/workspace');
+			assert.equal(extracted.file.fileName, 'app.txt');
+			assert.equal(extracted.file.content.toString('utf8'), 'hello\r\nnew\r\n');
+		},
+	);
+});
+
+test('Docker replaceExactText rejects ambiguous matches and Docker writeTextFile requires full control', async () => {
+	const dockerNode = new Docker();
+	const ambiguousArchiveBody = await createSingleFileTarArchive(
+		'app.txt',
+		Buffer.from('old and old again\n', 'utf8'),
+	);
+	const replaceContext = createExecuteContext({
+		node: createNodeMetadata('Docker', 'docker'),
+		parameters: {
+			containerId: 'demo',
+			filePath: 'app.txt',
+			newText: 'new',
+			oldText: 'old',
+			operation: 'replaceExactText',
+			resource: 'container',
+			workingPath: '/workspace',
+		},
+	});
+	const writeContext = createExecuteContext({
+		credentials: {
+			accessMode: 'readOnly',
+			apiVersion: '1.51',
+			connectionMode: 'unixSocket',
+			socketPath: '/var/run/docker.sock',
+		},
+		node: createNodeMetadata('Docker', 'docker'),
+		parameters: {
+			containerId: 'demo',
+			content: 'hello',
+			createParentDirectories: false,
+			filePath: 'app.txt',
+			operation: 'writeTextFile',
+			resource: 'container',
+			workingPath: '/workspace',
+		},
+	});
+
+	await withPatchedDockerClient(
+		{
+			accessMode: {
+				get() {
+					return 'fullControl';
+				},
+			},
+			async getContainerArchive() {
+				return {
+					body: ambiguousArchiveBody,
+					headers: {
+						'content-type': 'application/x-tar',
+					},
+					statusCode: 200,
+				};
+			},
+		},
+		async () => {
+			await assert.rejects(
+				async () => await dockerNode.execute.call(replaceContext),
+				/matched 2 locations/,
+			);
+		},
+	);
+
+	await assert.rejects(async () => await dockerNode.execute.call(writeContext), (error) => {
+		assert.equal(error.name, 'NodeOperationError');
+		assert.equal(
+			error.message.includes('Operation "writeTextFile" requires the credential Access Mode to be set to Full Control.'),
+			true,
+		);
+		return true;
+	});
+});
+
+test('Docker replaceExactText surfaces invalid UTF-8 content as a node error', async () => {
+	const dockerNode = new Docker();
+	const invalidUtf8ArchiveBody = await createSingleFileTarArchive(
+		'app.txt',
+		Buffer.from([0x66, 0x6f, 0x80, 0x6f]),
+	);
+	const context = createExecuteContext({
+		node: createNodeMetadata('Docker', 'docker'),
+		parameters: {
+			containerId: 'demo',
+			filePath: 'app.txt',
+			newText: 'new',
+			oldText: 'old',
+			operation: 'replaceExactText',
+			resource: 'container',
+			workingPath: '/workspace',
+		},
+	});
+
+	await withPatchedDockerClient(
+		{
+			accessMode: {
+				get() {
+					return 'fullControl';
+				},
+			},
+			async getContainerArchive() {
+				return {
+					body: invalidUtf8ArchiveBody,
+					headers: {
+						'content-type': 'application/x-tar',
+					},
+					statusCode: 200,
+				};
+			},
+		},
+		async () => {
+			await assert.rejects(async () => await dockerNode.execute.call(context), (error) => {
+				assert.equal(error.name, 'NodeOperationError');
+				assert.equal(
+					error.message.includes('is not valid UTF-8 text and cannot be edited as text.'),
+					true,
+				);
+				return true;
+			});
+		},
+	);
+});
+
 test('Docker Files copyTo converts binary input into a tar archive at the node boundary', async () => {
 	const dockerFilesNode = new DockerFiles();
 	const captured = {};

@@ -48,9 +48,22 @@
 | stats | - | Yes | Yes | Yes | Yes | Yes |
 | top | - | Yes | Yes | Yes | Yes | Yes |
 | exec | - | Yes | Yes | Stream enhancements | Yes | Yes |
+| readTextFile | - | - | - | - | - | Yes |
+| listFiles | - | - | - | - | - | Yes |
+| searchText | - | - | - | - | - | Yes |
+| writeTextFile | - | - | - | - | - | Yes |
+| replaceExactText | - | - | - | - | - | Yes |
 | copyTo | - | Yes | Yes | Yes | Yes | Yes |
 | copyFrom | - | Yes | Yes | Yes | Yes | Yes |
 | export | - | Yes | Yes | Yes | Yes | Yes |
+
+补充说明：
+
+- `readTextFile`、`listFiles`、`searchText`、`writeTextFile`、`replaceExactText` 属于 `Docker` 主节点上的 Linux-only convenience operations
+- 这些能力面向容器内文本文件读写与搜索，不替代 `Docker Files` 的 binary / tar 边界
+- `searchText` 无论走 `rg` 还是 `grep`，都按真实文件内容搜索，不遵守 ignore 规则，且 `Limit` 在 helper 层生效
+- 显式指定隐藏目录作为 `Working Path` 时，`listFiles` 仍以它为遍历根；`Include Hidden = false` 只过滤该根下的隐藏后代
+- `listFiles` / `searchText` 的 `Working Path` 不存在时返回节点级错误；`readTextFile` / `replaceExactText` 遇到非法 UTF-8 直接报错；`replaceExactText` 保留目标文件原有的统一换行风格
 
 ### Image
 

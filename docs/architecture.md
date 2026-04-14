@@ -27,11 +27,21 @@
 - `volume`
 - `system`
 
+在 `container` 资源内，除 Docker Engine 原生 request/response 动作外，
+当前也承接一小组 **Linux-only convenience operations**：
+
+- `readTextFile`
+- `listFiles`
+- `searchText`
+- `writeTextFile`
+- `replaceExactText`
+
 适合这个主节点的原因：
 
 - 都属于 Docker Engine API 核心资源
 - 都是典型 request/response 型动作
 - 很适合 n8n 的 `resource + operation` 交互模型
+- 这组文本 helper 仍然是 JSON/text 输出，保持 AI-usable 边界，比单独再拆一个节点更自然
 
 ### 2.2 `Docker Trigger`
 
@@ -186,12 +196,14 @@ nodes/DockerBuild/
 - 资源级业务逻辑
 - 输入参数到 Docker API 的转换
 - 输出结果到 n8n item 的转换
+- 固定 helper command 的封装与 stdout/stderr 解析
 
 ### utils 层
 
 负责：
 
 - tar 与 binary 互转
+- 容器路径规范化、文本解码和精确替换这类纯函数 helper
 - log / event stream 解析
 - build / import JSON-line 输出归一化
 - 错误信息标准化
@@ -240,6 +252,30 @@ Docker 文件导入导出不能只按普通文本字段来做，必须和 n8n bi
 
 - 默认输出 tar binary
 - 后续可提供“单文件自动解包”选项
+
+## 6.1 Linux-only 文本文件 helper
+
+`Docker Files` 继续负责 binary / tar 边界，但 `Docker` 主节点现在补了一层
+面向 AI 和 workflow 编排的文本 helper：
+
+- `readTextFile`
+- `listFiles`
+- `searchText`
+- `writeTextFile`
+- `replaceExactText`
+
+这些操作的设计原则：
+
+- 输出保持 JSON / text，而不是 binary
+- `readTextFile`、`writeTextFile`、`replaceExactText` 优先复用 archive + tar helper
+- `listFiles`、`searchText`、`writeTextFile(createParentDirectories=true)` 通过固定 `/bin/sh` helper command 落地
+- `listFiles` / `searchText` 的不存在路径要映射成稳定的节点级错误，而不是暴露底层 OCI `cwd` 失败
+- `searchText` 无论走 `rg` 还是 `grep`，都按容器文件系统真实内容搜索，不遵守 ignore 规则；`Limit` 要在 helper 层生效
+- 显式指定隐藏目录作为 `Working Path` 时，仍把它视为遍历根；`Include Hidden = false` 只过滤该根下的隐藏后代
+- `readTextFile` / `replaceExactText` 遇到非法 UTF-8 时直接报错，避免静默 lossy decode
+- `replaceExactText` 按 LF 视图匹配用户输入，但写回时保留目标文件原有的统一换行风格
+- 不暴露任意 shell 输入面，避免把 convenience layer 退化成另一个 `exec`
+- 明确只承诺 Linux 容器语义，不为 Windows container 做兼容抽象
 
 ## 7. 输出设计
 

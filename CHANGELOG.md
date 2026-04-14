@@ -1,3 +1,12 @@
+## 1.0.1 - 2026-04-14
+
+- Added Linux container text helper operations on the main `Docker` node: `container:listFiles`, `readTextFile`, `searchText`, `writeTextFile`, and `replaceExactText`
+- Fixed `container:searchText` so `Limit` is enforced in the helper layer instead of only trimming parsed results after a full scan
+- Fixed `container:listFiles` hidden-path handling so an explicitly selected hidden `Working Path` still traverses visible descendants while continuing to filter hidden children when `Include Hidden = false`
+- Fixed `container:readTextFile` and `replaceExactText` to reject invalid UTF-8 text instead of silently lossy-decoding file contents
+- Added regression and integration coverage for helper-side search limits, hidden working roots, CRLF-preserving text replacement, and invalid UTF-8 error handling
+- Updated README, architecture docs, and operations matrix to document the new helper operations and their Linux-only execution boundaries
+
 ## 1.0.0 - 2026-04-14
 
 - Added SSH transport support for Docker-over-remote-Unix-socket workflows with key-based authentication, SSH port and remote socket path settings, private key validation, and shared credential testing across all four nodes

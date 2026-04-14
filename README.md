@@ -18,7 +18,8 @@
 ## 节点族
 
 - `Docker`
-  负责容器、镜像、网络、卷和 daemon metadata 的 JSON / 文本型操作。
+  负责容器、镜像、网络、卷和 daemon metadata 的 JSON / 文本型操作，
+  也承接 Linux 容器内的文本文件 helper 操作。
   这是唯一保留为 AI-usable 的节点。
 - `Docker Files`
   负责 `copyTo`、`copyFrom`、`export`、`image save`、`image load`。
@@ -32,7 +33,7 @@
 
 已实现的资源与操作：
 
-- `container`: `list`, `inspect`, `create`, `update`, `start`, `stop`, `restart`, `remove`, `logs`, `stats`, `top`, `wait`, `exec`
+- `container`: `list`, `inspect`, `create`, `update`, `start`, `stop`, `restart`, `remove`, `logs`, `stats`, `top`, `wait`, `exec`, `readTextFile`, `listFiles`, `searchText`, `writeTextFile`, `replaceExactText`
 - `image`: `list`, `inspect`, `pull`, `tag`, `remove`, `history`, `prune`, `save`, `load`, `build`, `import`
 - `network`: `list`, `inspect`, `create`, `connect`, `disconnect`, `delete`, `prune`
 - `volume`: `list`, `inspect`, `create`, `delete`, `prune`
@@ -41,9 +42,44 @@
 流式与长任务增强：
 
 - `container:logs` 支持 `snapshot` / `followForDuration`
+- `container:readTextFile` / `listFiles` / `searchText` / `writeTextFile` / `replaceExactText`
+  提供 Linux-only 的 container 文本文件 helper 能力
 - `system:events` 支持 `bounded` / `resumeFromCursor`
 - `Docker Trigger` 支持 replay、dedupe、reconnect
 - `Docker Build` 支持 streamed build/import output、超时、取消和 continue-on-fail
+
+这些 convenience operation 的边界是：
+
+- 只承诺 **Linux 容器** 语义
+- `listFiles`、`searchText`、`writeTextFile(createParentDirectories=true)` 依赖容器内存在 `/bin/sh`
+- `listFiles` 依赖常见用户态工具如 `find`、`sort`、`sed`
+- `searchText` 优先使用 `rg`，缺失时回退到 `grep`，两条路径都按容器文件系统真实内容搜索，不遵守 ignore 规则；`Limit` 会在 helper 层生效，而不是只裁剪最终返回 items
+- `listFiles` / `searchText` 的 `Working Path` 不存在时，会返回节点级错误而不是 OCI `cwd` 细节
+- `listFiles` 在显式指定隐藏目录作为 `Working Path` 时，仍会把它当作遍历根；`Include Hidden = false` 只过滤该根下的隐藏后代
+- `readTextFile` / `replaceExactText` 只接受有效 UTF-8 文本，遇到非法 UTF-8 会返回节点级错误
+- `replaceExactText` 会保留目标文件原有的统一换行风格，不会把 CRLF 文件整体改写成 LF
+
+## 文本文件 helper 迁移说明
+
+如果你之前在本机 n8n 里用 workflow 形式维护这些 tool：
+
+- `tool_read_container_file`
+- `tool_list_container_files`
+- `tool_search_container_text`
+- `tool_apply_container_patch`
+
+现在建议直接迁移到 `Docker` 主节点的公开 operation：
+
+- `tool_read_container_file` -> `container:readTextFile`
+- `tool_list_container_files` -> `container:listFiles`
+- `tool_search_container_text` -> `container:searchText`
+- `tool_apply_container_patch` -> `container:writeTextFile` / `container:replaceExactText`
+
+注意：
+
+- 新 operation 的返回结构按节点风格重做，不再兼容旧 workflow 的 `ok/errorCode/message` 契约
+- `tool_apply_container_patch` 的 mode-based 接口已拆成两个 operation
+- 旧 workflow 更像上层 tool 封装；节点内置后，建议直接在工作流里调用社区节点原生操作
 
 ## 连接方式
 
@@ -95,7 +131,7 @@ Docker daemon 的写权限基本等价于宿主机高权限控制，所以这个
 
 - `API Version = auto` 时会自动协商 Docker Engine API version
 - `Access Mode = Read Only` 仅允许只读资源操作和事件/日志读取
-- `Access Mode = Full Control` 才允许 create/update/remove/pull/tag/build/import/file copy 等写操作
+- `Access Mode = Full Control` 才允许 create/update/remove/pull/tag/build/import/file copy，以及 `writeTextFile` / `replaceExactText` 这类写操作
 - 由于 n8n 的静态 credential test 不适合 Unix socket 和 SSH stream-local forwarding，这个包统一使用 **node-level credential test**
 
 ## 文档导航

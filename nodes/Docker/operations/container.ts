@@ -5,6 +5,17 @@ import { parseDockerRawStream } from '../transport/dockerLogs';
 import type { DockerApiClient, DockerJson } from '../transport/dockerClient';
 import { collectDockerStreamResponse } from '../transport/dockerStreams';
 import type { ContainerOperation } from '../types';
+import {
+	decodeRawContainerTextBuffer,
+	LIST_FILES_SHELL_SCRIPT,
+	normalizeContainerPath,
+	SEARCH_TEXT_SHELL_SCRIPT,
+	parseListFilesOutput,
+	parseSearchTextOutput,
+	readContainerText,
+	replaceExactContainerText,
+	resolveContainerFilePath,
+} from '../utils/containerText';
 import { evaluateExecPolicy } from '../utils/execPolicy';
 import {
 	assertNonEmptyValue,
@@ -15,6 +26,7 @@ import {
 	trimToUndefined,
 } from '../utils/execution';
 import { deepMergeObjects, normalizeJsonParameter } from '../utils/merge';
+import { createSingleFileTarArchive, extractSingleFileFromTarBuffer } from '../utils/tar';
 
 interface KeyValuePair {
 	name: string;
@@ -387,6 +399,209 @@ function buildExecRequest(context: IExecuteFunctions, itemIndex: number): {
 	};
 }
 
+function getOptionalPositiveInteger(
+	context: IExecuteFunctions,
+	itemIndex: number,
+	name: string,
+	label: string,
+): number | undefined {
+	const node = getNodeGetter(context);
+	const rawValue = context.getNodeParameter(name, itemIndex, '') as number | string;
+
+	if (rawValue === '' || rawValue === undefined || rawValue === null) {
+		return undefined;
+	}
+
+	return normalizePositiveInteger(node, Number(rawValue), label, itemIndex);
+}
+
+function getContainerWorkingPath(context: IExecuteFunctions, itemIndex: number): string {
+	const workingPath = normalizeContainerPath(
+		String(context.getNodeParameter('workingPath', itemIndex, '/')).trim() || '/',
+	);
+
+	if (!workingPath.startsWith('/')) {
+		throw new NodeOperationError(context.getNode(), 'Working Path must be an absolute container path.', {
+			itemIndex,
+		});
+	}
+
+	return workingPath;
+}
+
+function getContainerFileRequest(
+	context: IExecuteFunctions,
+	itemIndex: number,
+): ReturnType<typeof resolveContainerFilePath> {
+	const filePath = context.getNodeParameter('filePath', itemIndex) as string;
+	const request = resolveContainerFilePath(
+		assertNonEmptyValue(getNodeGetter(context), filePath, 'File Path', itemIndex),
+		context.getNodeParameter('workingPath', itemIndex, '/') as string,
+	);
+
+	if (!request.workingPath.startsWith('/')) {
+		throw new NodeOperationError(context.getNode(), 'Working Path must be an absolute container path.', {
+			itemIndex,
+		});
+	}
+
+	if (request.resolvedPath === '/' || request.fileName === '') {
+		throw new NodeOperationError(
+			context.getNode(),
+			'File Path must resolve to a file, not a directory root.',
+			{ itemIndex },
+		);
+	}
+
+	return request;
+}
+
+function getInternalExecFailureMessage(stdout: string, stderr: string): string {
+	const details = trimToUndefined(stderr) ?? trimToUndefined(stdout);
+
+	if (details === undefined) {
+		return 'No command output was returned.';
+	}
+
+	return details.length > 400 ? `${details.slice(0, 397)}...` : details;
+}
+
+function createContainerTextOperationError(
+	context: IExecuteFunctions,
+	itemIndex: number,
+	resolvedPath: string,
+	mode: 'edit' | 'read',
+	error: unknown,
+): NodeOperationError | undefined {
+	if (!(error instanceof Error)) {
+		return undefined;
+	}
+
+	if (error.message === 'BINARY_FILE_NOT_SUPPORTED') {
+		return new NodeOperationError(
+			context.getNode(),
+			`File Path "${resolvedPath}" appears to be binary and cannot be ${mode === 'read' ? 'returned' : 'edited'} as text.`,
+			{ itemIndex },
+		);
+	}
+
+	if (error.message === 'INVALID_UTF8_TEXT') {
+		return new NodeOperationError(
+			context.getNode(),
+			`File Path "${resolvedPath}" is not valid UTF-8 text and cannot be ${mode === 'read' ? 'returned' : 'edited'} as text.`,
+			{ itemIndex },
+		);
+	}
+
+	return undefined;
+}
+
+async function runInternalContainerShellCommand(
+	client: DockerApiClient,
+	context: IExecuteFunctions,
+	itemIndex: number,
+	containerId: string,
+	script: string,
+	options?: {
+		env?: KeyValuePair[];
+		workingDir?: string;
+	},
+): Promise<{
+	exitCode: number | null;
+	stderr: string;
+	stdout: string;
+}> {
+	const abortSignal = context.getExecutionCancelSignal();
+	const execCreateBody: DockerJson = {
+		AttachStderr: true,
+		AttachStdout: true,
+		Cmd: ['/bin/sh', '-lc', script],
+		Privileged: false,
+		Tty: false,
+	};
+
+	if (options?.env !== undefined && options.env.length > 0) {
+		execCreateBody.Env = options.env.map(({ name, value }) => `${name}=${value}`);
+	}
+
+	if (options?.workingDir !== undefined) {
+		execCreateBody.WorkingDir = options.workingDir;
+	}
+
+	const execCreateResponse = await client.createContainerExec(containerId, execCreateBody, abortSignal);
+	const execId = String(execCreateResponse.Id ?? '');
+
+	if (execId === '') {
+		throw new NodeOperationError(
+			context.getNode(),
+			'Docker did not return an exec ID for the internal container helper command.',
+			{ itemIndex },
+		);
+	}
+
+	const execStartResponse = await client.startContainerExec(
+		execId,
+		{
+			Detach: false,
+			Tty: false,
+		},
+		abortSignal,
+	);
+	const execInspectResponse = await client.inspectContainerExec(execId, abortSignal);
+	const parsedOutput = parseDockerRawStream(
+		execStartResponse.body,
+		execStartResponse.headers['content-type'],
+	);
+
+	return {
+		exitCode:
+			typeof execInspectResponse.ExitCode === 'number' ? execInspectResponse.ExitCode : null,
+		stderr: parsedOutput.streamText.stderr,
+		stdout: parsedOutput.streamText.stdout,
+	};
+}
+
+async function getSingleContainerFileBuffer(
+	client: DockerApiClient,
+	context: IExecuteFunctions,
+	itemIndex: number,
+	containerId: string,
+	resolvedPath: string,
+): Promise<Buffer> {
+	const archiveResponse = await client.getContainerArchive(
+		containerId,
+		{ path: resolvedPath },
+		context.getExecutionCancelSignal(),
+	);
+	const extractionResult = await extractSingleFileFromTarBuffer(archiveResponse.body);
+
+	if (extractionResult.file !== undefined) {
+		return extractionResult.file.content;
+	}
+
+	if (extractionResult.reason === 'multipleEntries') {
+		throw new NodeOperationError(
+			context.getNode(),
+			`File Path "${resolvedPath}" expanded to multiple files. Specify a single regular file.`,
+			{ itemIndex },
+		);
+	}
+
+	if (extractionResult.reason === 'nonFileEntry') {
+		throw new NodeOperationError(
+			context.getNode(),
+			`File Path "${resolvedPath}" is not a regular file.`,
+			{ itemIndex },
+		);
+	}
+
+	throw new NodeOperationError(
+		context.getNode(),
+		`File Path "${resolvedPath}" did not return any file content.`,
+		{ itemIndex },
+	);
+}
+
 function mapProcessRows(rawTopResponse: DockerJson): IDataObject[] {
 	const titles = Array.isArray(rawTopResponse.Titles) ? rawTopResponse.Titles : [];
 	const processes = Array.isArray(rawTopResponse.Processes) ? rawTopResponse.Processes : [];
@@ -498,6 +713,84 @@ export async function executeContainerOperation(
 			const selectedContainers = limit === undefined ? containers : containers.slice(0, limit);
 
 			return selectedContainers.map((container) => toExecutionItem(container, itemIndex));
+		}
+
+		case 'listFiles': {
+			const containerId = assertNonEmptyValue(
+				node,
+				context.getNodeParameter('containerId', itemIndex) as string,
+				'Container ID or Name',
+				itemIndex,
+			);
+			const workingPath = getContainerWorkingPath(context, itemIndex);
+			const glob = trimToUndefined(context.getNodeParameter('glob', itemIndex, '') as string);
+			const includeHidden = context.getNodeParameter('includeHidden', itemIndex, false) as boolean;
+			const maxDepth = normalizePositiveInteger(
+				node,
+				context.getNodeParameter('maxDepth', itemIndex, 4) as number,
+				'Max Depth',
+				itemIndex,
+			);
+			const returnAll = context.getNodeParameter('listFilesReturnAll', itemIndex, true) as boolean;
+			const limit = returnAll
+				? undefined
+				: normalizePositiveInteger(
+						node,
+						context.getNodeParameter('listFilesLimit', itemIndex, 200) as number,
+						'Limit',
+						itemIndex,
+					);
+			const commandResult = await runInternalContainerShellCommand(
+				client,
+				context,
+				itemIndex,
+				containerId,
+				LIST_FILES_SHELL_SCRIPT,
+				{
+					env: [
+						{ name: 'GLOB', value: glob ?? '' },
+						{ name: 'INCLUDE_HIDDEN', value: includeHidden ? 'true' : 'false' },
+						{ name: 'LIST_ROOT', value: workingPath },
+						{ name: 'MAX_DEPTH', value: String(maxDepth) },
+						{ name: 'MAX_ENTRIES', value: String(limit ?? 0) },
+					],
+					workingDir: '/',
+				},
+			);
+			const parsedOutput = parseListFilesOutput(commandResult.stdout, workingPath);
+
+			if (parsedOutput.pathNotFound !== null) {
+				throw new NodeOperationError(
+					context.getNode(),
+					`Working Path "${parsedOutput.pathNotFound}" was not found in the container.`,
+					{ itemIndex },
+				);
+			}
+
+			if (commandResult.exitCode !== null && commandResult.exitCode !== 0) {
+				throw new NodeOperationError(
+					context.getNode(),
+					`listFiles failed with exit code ${commandResult.exitCode}: ${getInternalExecFailureMessage(commandResult.stdout, commandResult.stderr)}`,
+					{ itemIndex },
+				);
+			}
+
+			const entries =
+				limit === undefined ? parsedOutput.entries : parsedOutput.entries.slice(0, limit);
+
+			return entries.map((entry) =>
+				toExecutionItem(
+					{
+						absolutePath: entry.absolutePath,
+						containerId,
+						entryType: entry.entryType,
+						operation: 'listFiles',
+						path: entry.path,
+						workingPath,
+					},
+					itemIndex,
+				),
+			);
 		}
 
 		case 'inspect': {
@@ -613,6 +906,163 @@ export async function executeContainerOperation(
 					itemIndex,
 				),
 			];
+		}
+
+		case 'readTextFile': {
+			const containerId = assertNonEmptyValue(
+				node,
+				context.getNodeParameter('containerId', itemIndex) as string,
+				'Container ID or Name',
+				itemIndex,
+			);
+			const fileRequest = getContainerFileRequest(context, itemIndex);
+			const startLine = getOptionalPositiveInteger(context, itemIndex, 'startLine', 'Start Line');
+			const endLine = getOptionalPositiveInteger(context, itemIndex, 'endLine', 'End Line');
+
+			if (startLine !== undefined && endLine !== undefined && startLine > endLine) {
+				throw new NodeOperationError(
+					context.getNode(),
+					'Start Line must be less than or equal to End Line.',
+					{ itemIndex },
+				);
+			}
+
+			const fileBuffer = await getSingleContainerFileBuffer(
+				client,
+				context,
+				itemIndex,
+				containerId,
+				fileRequest.resolvedPath,
+			);
+			let textResult;
+
+			try {
+				textResult = readContainerText(fileBuffer, { endLine, startLine });
+			} catch (error) {
+				const textError = createContainerTextOperationError(
+					context,
+					itemIndex,
+					fileRequest.resolvedPath,
+					'read',
+					error,
+				);
+
+				if (textError !== undefined) {
+					throw textError;
+				}
+
+				throw error;
+			}
+
+			return [
+				toExecutionItem(
+					{
+						containerId,
+						content: textResult.content,
+						fileByteCount: textResult.fileByteCount,
+						hasMoreAfter: textResult.hasMoreAfter,
+						hasMoreBefore: textResult.hasMoreBefore,
+						lineEnd: textResult.lineEnd,
+						lineStart: textResult.lineStart,
+						operation: 'readTextFile',
+						requestedEndLine: textResult.requestedEndLine,
+						requestedPath: fileRequest.requestedPath,
+						requestedStartLine: textResult.requestedStartLine,
+						resolvedPath: fileRequest.resolvedPath,
+						returnedLineCount: textResult.returnedLineCount,
+						totalLineCount: textResult.totalLineCount,
+					},
+					itemIndex,
+				),
+			];
+		}
+
+		case 'searchText': {
+			const containerId = assertNonEmptyValue(
+				node,
+				context.getNodeParameter('containerId', itemIndex) as string,
+				'Container ID or Name',
+				itemIndex,
+			);
+			const workingPath = getContainerWorkingPath(context, itemIndex);
+			const query = assertNonEmptyValue(
+				node,
+				context.getNodeParameter('query', itemIndex) as string,
+				'Query',
+				itemIndex,
+			);
+			const glob = trimToUndefined(context.getNodeParameter('glob', itemIndex, '') as string);
+			const caseSensitive = context.getNodeParameter('caseSensitive', itemIndex, false) as boolean;
+			const returnAll = context.getNodeParameter('searchTextReturnAll', itemIndex, true) as boolean;
+			const limit = returnAll
+				? undefined
+				: normalizePositiveInteger(
+						node,
+						context.getNodeParameter('searchTextLimit', itemIndex, 50) as number,
+						'Limit',
+						itemIndex,
+					);
+			const commandResult = await runInternalContainerShellCommand(
+				client,
+				context,
+				itemIndex,
+				containerId,
+				SEARCH_TEXT_SHELL_SCRIPT,
+				{
+						env: [
+							{ name: 'CASE_SENSITIVE', value: caseSensitive ? 'true' : 'false' },
+							{ name: 'GLOB', value: glob ?? '' },
+							{ name: 'MAX_MATCHES', value: String(limit ?? 0) },
+							{ name: 'QUERY', value: query },
+							{ name: 'SEARCH_ROOT', value: workingPath },
+						],
+					workingDir: '/',
+				},
+			);
+			const parsedOutput = parseSearchTextOutput(commandResult.stdout, workingPath);
+
+			if (parsedOutput.pathNotFound !== null) {
+				throw new NodeOperationError(
+					context.getNode(),
+					`Working Path "${parsedOutput.pathNotFound}" was not found in the container.`,
+					{ itemIndex },
+				);
+			}
+
+			if (
+				commandResult.exitCode !== null &&
+				commandResult.exitCode !== 0 &&
+				!(
+					commandResult.exitCode === 1 &&
+					trimToUndefined(commandResult.stdout) === undefined
+				)
+			) {
+				throw new NodeOperationError(
+					context.getNode(),
+					`searchText failed with exit code ${commandResult.exitCode}: ${getInternalExecFailureMessage(commandResult.stdout, commandResult.stderr)}`,
+					{ itemIndex },
+				);
+			}
+
+			const matches =
+				limit === undefined ? parsedOutput.matches : parsedOutput.matches.slice(0, limit);
+
+			return matches.map((match) =>
+				toExecutionItem(
+					{
+						absolutePath: match.absolutePath,
+						caseSensitive,
+						containerId,
+						line: match.line,
+						operation: 'searchText',
+						path: match.path,
+						query,
+						text: match.text,
+						workingPath,
+					},
+					itemIndex,
+				),
+			);
 		}
 
 		case 'start':
@@ -813,6 +1263,165 @@ export async function executeContainerOperation(
 						containerId,
 						operation: 'update',
 						update: updateResponse,
+					},
+					itemIndex,
+				),
+			];
+		}
+
+		case 'writeTextFile': {
+			assertWritableAccess(node, client.accessMode, operation, itemIndex);
+
+			const containerId = assertNonEmptyValue(
+				node,
+				context.getNodeParameter('containerId', itemIndex) as string,
+				'Container ID or Name',
+				itemIndex,
+			);
+			const fileRequest = getContainerFileRequest(context, itemIndex);
+			const content = String(context.getNodeParameter('content', itemIndex, ''));
+			const createParentDirectories = context.getNodeParameter(
+				'createParentDirectories',
+				itemIndex,
+				true,
+			) as boolean;
+
+			if (createParentDirectories) {
+				const commandResult = await runInternalContainerShellCommand(
+					client,
+					context,
+					itemIndex,
+					containerId,
+					'mkdir -p "$TARGET_DIR"',
+					{
+						env: [{ name: 'TARGET_DIR', value: fileRequest.targetPath }],
+						workingDir: '/',
+					},
+				);
+
+				if (commandResult.exitCode !== null && commandResult.exitCode !== 0) {
+					throw new NodeOperationError(
+						context.getNode(),
+						`Failed to create parent directory "${fileRequest.targetPath}" in the container: ${getInternalExecFailureMessage(commandResult.stdout, commandResult.stderr)}`,
+						{ itemIndex },
+					);
+				}
+			}
+
+			const fileBuffer = Buffer.from(content, 'utf8');
+			const archiveBuffer = await createSingleFileTarArchive(fileRequest.fileName, fileBuffer);
+			const actionResult = await client.putContainerArchive(
+				containerId,
+				{
+					body: archiveBuffer,
+					path: fileRequest.targetPath,
+				},
+				abortSignal,
+			);
+
+			return [
+				toExecutionItem(
+					{
+						bytesWritten: fileBuffer.length,
+						changed: actionResult.changed,
+						containerId,
+						operation: 'writeTextFile',
+						requestedPath: fileRequest.requestedPath,
+						resolvedPath: fileRequest.resolvedPath,
+						statusCode: actionResult.statusCode,
+					},
+					itemIndex,
+				),
+			];
+		}
+
+		case 'replaceExactText': {
+			assertWritableAccess(node, client.accessMode, operation, itemIndex);
+
+			const containerId = assertNonEmptyValue(
+				node,
+				context.getNodeParameter('containerId', itemIndex) as string,
+				'Container ID or Name',
+				itemIndex,
+			);
+			const fileRequest = getContainerFileRequest(context, itemIndex);
+			const oldText = String(context.getNodeParameter('oldText', itemIndex, ''));
+			const newText = String(context.getNodeParameter('newText', itemIndex, ''));
+
+			if (oldText === '') {
+				throw new NodeOperationError(context.getNode(), 'Old Text is required.', { itemIndex });
+			}
+
+			const fileBuffer = await getSingleContainerFileBuffer(
+				client,
+				context,
+				itemIndex,
+				containerId,
+				fileRequest.resolvedPath,
+			);
+			let currentText: string;
+
+			try {
+				currentText = decodeRawContainerTextBuffer(fileBuffer);
+			} catch (error) {
+				const textError = createContainerTextOperationError(
+					context,
+					itemIndex,
+					fileRequest.resolvedPath,
+					'edit',
+					error,
+				);
+
+				if (textError !== undefined) {
+					throw textError;
+				}
+
+				throw error;
+			}
+
+			const replacement = replaceExactContainerText(currentText, oldText, newText);
+
+			if (replacement.updatedText === undefined && replacement.matchCount === 0) {
+				throw new NodeOperationError(
+					context.getNode(),
+					`Old Text was not found in "${fileRequest.resolvedPath}".`,
+					{ itemIndex },
+				);
+			}
+
+			if (replacement.updatedText === undefined) {
+				throw new NodeOperationError(
+					context.getNode(),
+					`Old Text matched ${replacement.matchCount} locations in "${fileRequest.resolvedPath}". Narrow the patch context and try again.`,
+					{ itemIndex },
+				);
+			}
+
+			const updatedBuffer = Buffer.from(replacement.updatedText, 'utf8');
+			const archiveBuffer = await createSingleFileTarArchive(
+				fileRequest.fileName,
+				updatedBuffer,
+			);
+			const actionResult = await client.putContainerArchive(
+				containerId,
+				{
+					body: archiveBuffer,
+					path: fileRequest.targetPath,
+				},
+				abortSignal,
+			);
+
+			return [
+				toExecutionItem(
+					{
+						bytesWritten: updatedBuffer.length,
+						changed: actionResult.changed,
+						containerId,
+						operation: 'replaceExactText',
+						replacementCount: 1,
+						requestedPath: fileRequest.requestedPath,
+						resolvedPath: fileRequest.resolvedPath,
+						statusCode: actionResult.statusCode,
 					},
 					itemIndex,
 				),

@@ -5,15 +5,20 @@ export type ContainerOperation =
 	| 'exec'
 	| 'inspect'
 	| 'list'
+	| 'listFiles'
 	| 'logs'
+	| 'readTextFile'
 	| 'remove'
+	| 'replaceExactText'
 	| 'restart'
+	| 'searchText'
 	| 'start'
 	| 'stats'
 	| 'stop'
 	| 'top'
 	| 'update'
-	| 'wait';
+	| 'wait'
+	| 'writeTextFile';
 
 export type ImageOperation =
 	| 'history'
@@ -53,9 +58,11 @@ export const writableDockerOperations = new Set<DockerOperation>([
 	'pull',
 	'prune',
 	'remove',
+	'replaceExactText',
 	'restart',
 	'start',
 	'stop',
 	'tag',
 	'update',
+	'writeTextFile',
 ]);

@@ -1,4 +1,8 @@
 const assert = require('node:assert/strict');
+const { execFileSync } = require('node:child_process');
+const { mkdtempSync, mkdirSync, rmSync, writeFileSync } = require('node:fs');
+const { tmpdir } = require('node:os');
+const { join } = require('node:path');
 const test = require('node:test');
 const { pack } = require('tar-stream');
 
@@ -6,6 +10,18 @@ const { Docker } = require('../dist/nodes/Docker/Docker.node.js');
 const { DockerBuild } = require('../dist/nodes/DockerBuild/DockerBuild.node.js');
 const { DockerFiles } = require('../dist/nodes/DockerFiles/DockerFiles.node.js');
 const { DockerTrigger } = require('../dist/nodes/DockerTrigger/DockerTrigger.node.js');
+const {
+	decodeContainerTextBuffer,
+	decodeRawContainerTextBuffer,
+	LIST_FILES_SHELL_SCRIPT,
+	normalizeContainerPath,
+	parseListFilesOutput,
+	parseSearchTextOutput,
+	readContainerText,
+	replaceExactContainerText,
+	resolveContainerFilePath,
+	SEARCH_TEXT_SHELL_SCRIPT,
+} = require('../dist/nodes/Docker/utils/containerText.js');
 const { evaluateExecPolicy } = require('../dist/nodes/Docker/utils/execPolicy.js');
 const {
 	createSingleFileTarArchive,
@@ -109,7 +125,26 @@ test('Docker remains AI-usable while Docker Files is not', () => {
 
 	assert.deepEqual(
 		dockerContainerOperationProperty.options.map((option) => option.value),
-		['create', 'exec', 'inspect', 'list', 'logs', 'remove', 'restart', 'start', 'stats', 'stop', 'top', 'update', 'wait'],
+		[
+			'create',
+			'exec',
+			'inspect',
+			'list',
+			'listFiles',
+			'logs',
+			'readTextFile',
+			'remove',
+			'replaceExactText',
+			'restart',
+			'searchText',
+			'start',
+			'stats',
+			'stop',
+			'top',
+			'update',
+			'wait',
+			'writeTextFile',
+		],
 	);
 	assert.deepEqual(
 		dockerFilesOperationProperty.options.map((option) => option.value),
@@ -177,6 +212,150 @@ test('evaluateExecPolicy applies allow and deny lists to argv[0] names', () => {
 		deniedBy: 'denyList',
 		requiresAllowListMatch: true,
 	});
+});
+
+test('container text helpers normalize paths and resolve relative file requests', () => {
+	assert.equal(normalizeContainerPath('/workspace/../app//config/./file.txt'), '/app/config/file.txt');
+	assert.equal(normalizeContainerPath('logs/../app.txt'), 'app.txt');
+	assert.deepEqual(resolveContainerFilePath('config/app.env', '/workspace/demo'), {
+		fileName: 'app.env',
+		requestedPath: 'config/app.env',
+		resolvedPath: '/workspace/demo/config/app.env',
+		targetPath: '/workspace/demo/config',
+		workingPath: '/workspace/demo',
+	});
+	assert.deepEqual(resolveContainerFilePath('/etc/app.env', '/workspace/demo'), {
+		fileName: 'app.env',
+		requestedPath: '/etc/app.env',
+		resolvedPath: '/etc/app.env',
+		targetPath: '/etc',
+		workingPath: '/workspace/demo',
+	});
+});
+
+test('container text helpers decode text, slice lines, and reject binary content', () => {
+	const buffer = Buffer.from('first\r\nsecond\r\nthird\r\n', 'utf8');
+	const readResult = readContainerText(buffer, { endLine: 2, startLine: 2 });
+	const invalidUtf8Buffer = Buffer.from([0x66, 0x6f, 0x80, 0x6f]);
+
+	assert.equal(decodeRawContainerTextBuffer(Buffer.from('alpha\r\nbeta\r', 'utf8')), 'alpha\r\nbeta\r');
+	assert.equal(decodeContainerTextBuffer(Buffer.from('alpha\r\nbeta\r', 'utf8')), 'alpha\nbeta\n');
+	assert.deepEqual(readResult, {
+		content: 'second',
+		fileByteCount: buffer.length,
+		hasMoreAfter: true,
+		hasMoreBefore: true,
+		lineEnd: 2,
+		lineStart: 2,
+		requestedEndLine: 2,
+		requestedStartLine: 2,
+		returnedLineCount: 1,
+		totalLineCount: 3,
+	});
+	assert.throws(() => decodeContainerTextBuffer(Buffer.from([0, 1, 2])), /BINARY_FILE_NOT_SUPPORTED/);
+	assert.throws(() => decodeContainerTextBuffer(invalidUtf8Buffer), /INVALID_UTF8_TEXT/);
+});
+
+test('container text helpers replace exact text and parse list/search shell output', () => {
+	assert.deepEqual(replaceExactContainerText('hello world', 'world', 'docker'), {
+		matchCount: 1,
+		updatedText: 'hello docker',
+	});
+	assert.deepEqual(
+		replaceExactContainerText('alpha\r\nbeta\r\ngamma\r\n', 'beta', 'BETA\ndelta'),
+		{
+			matchCount: 1,
+			updatedText: 'alpha\r\nBETA\r\ndelta\r\ngamma\r\n',
+		},
+	);
+	assert.deepEqual(replaceExactContainerText('repeat repeat', 'repeat', 'done'), {
+		matchCount: 2,
+	});
+	assert.equal(LIST_FILES_SHELL_SCRIPT.includes('should_include_relative_path'), true);
+	assert.equal(SEARCH_TEXT_SHELL_SCRIPT.includes('--no-ignore'), true);
+	assert.equal(SEARCH_TEXT_SHELL_SCRIPT.includes('MAX_MATCHES'), true);
+	assert.deepEqual(
+		parseListFilesOutput('directory\tsrc\nfile\tsrc/app.ts\n', '/workspace'),
+		{
+			entries: [
+				{
+					absolutePath: '/workspace/src',
+					entryType: 'directory',
+					path: 'src',
+				},
+				{
+					absolutePath: '/workspace/src/app.ts',
+					entryType: 'file',
+					path: 'src/app.ts',
+				},
+			],
+			pathNotFound: null,
+		},
+	);
+	assert.deepEqual(
+		parseSearchTextOutput('/workspace/src/app.ts:12:needle here\n', '/workspace'),
+		{
+			matches: [
+				{
+					absolutePath: '/workspace/src/app.ts',
+					line: 12,
+					path: 'src/app.ts',
+					text: 'needle here',
+				},
+			],
+			pathNotFound: null,
+		},
+	);
+	assert.deepEqual(
+		parseListFilesOutput('__ERROR__\tPATH_NOT_FOUND\t/missing\n', '/workspace'),
+		{
+			entries: [],
+			pathNotFound: '/missing',
+		},
+	);
+});
+
+test('container text listFiles helper traverses hidden roots while still filtering hidden descendants', () => {
+	const workspaceRoot = mkdtempSync(join(tmpdir(), 'n8n-list-files-'));
+	const hiddenRoot = join(workspaceRoot, '.hidden-root');
+
+	mkdirSync(join(hiddenRoot, 'visible'), { recursive: true });
+	mkdirSync(join(hiddenRoot, '.nested-hidden'), { recursive: true });
+	writeFileSync(join(hiddenRoot, 'visible', 'app.txt'), 'visible\n');
+	writeFileSync(join(hiddenRoot, '.nested-hidden', 'secret.txt'), 'secret\n');
+
+	try {
+		const stdout = execFileSync('sh', ['-lc', LIST_FILES_SHELL_SCRIPT], {
+			encoding: 'utf8',
+			env: {
+				...process.env,
+				GLOB: '',
+				INCLUDE_HIDDEN: 'false',
+				LIST_ROOT: hiddenRoot,
+				MAX_DEPTH: '4',
+				MAX_ENTRIES: '0',
+			},
+		});
+		const parsed = parseListFilesOutput(stdout, hiddenRoot);
+
+		assert.deepEqual(parsed, {
+			entries: [
+				{
+					absolutePath: `${hiddenRoot}/visible`,
+					entryType: 'directory',
+					path: 'visible',
+				},
+				{
+					absolutePath: `${hiddenRoot}/visible/app.txt`,
+					entryType: 'file',
+					path: 'visible/app.txt',
+				},
+			],
+			pathNotFound: null,
+		});
+	} finally {
+		rmSync(workspaceRoot, { force: true, recursive: true });
+	}
 });
 
 test('tar helpers round-trip a single file and decode archive headers', async () => {
